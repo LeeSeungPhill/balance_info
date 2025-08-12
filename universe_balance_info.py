@@ -411,16 +411,28 @@ else:
         # Streamlit 앱 구성
         st.title("일별 주문체결 조회")
 
+        # 주문유형 필터
         all_types = df4['주문유형'].unique()
         주문유형리스트 = [t for t in all_types if t in ('매수', '매도')]
         선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트)
 
-        선택주문유형_df = df4[df4['주문유형'] == 선택주문유형].copy()
+        # 주문상태 필터
+        all_states = df4['주문상태'].unique()
+        주문상태리스트 = [t for t in all_states if t in ('done', 'cancel', 'wait')]
+        선택주문상태 = st.selectbox("주문상태를 선택하세요", 주문상태리스트)
 
-        선택주문유형_df['주문일자'] = pd.to_datetime(선택주문유형_df['주문일자'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
-        선택주문유형_df['주문시각'] = pd.to_datetime(선택주문유형_df['주문시각'], format='%H%M%S').dt.strftime('%H:%M:%S')
+        # 선택한 주문유형 + 주문상태로 필터링
+        선택필터_df = df4[
+            (df4['주문유형'] == 선택주문유형) &
+            (df4['주문상태'] == 선택주문상태)
+        ].copy()
 
-        df_display = 선택주문유형_df.sort_values(by=['주문일자', '주문시각'], ascending=False).copy().reset_index(drop=True)
+        # 날짜/시간 포맷 변경
+        선택필터_df['주문일자'] = pd.to_datetime(선택필터_df['주문일자'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
+        선택필터_df['주문시각'] = pd.to_datetime(선택필터_df['주문시각'], format='%H%M%S').dt.strftime('%H:%M:%S')
+
+        # 최신 순 정렬
+        df_display = 선택필터_df.sort_values(by=['주문일자', '주문시각'], ascending=False).reset_index(drop=True)
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -447,7 +459,7 @@ else:
             '잔여수량': 70,
         }
 
-        # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+        # 숫자 포맷 JS
         number_format_js = JsCode("""
             function(params) {
                 if (params.value === null || params.value === undefined) {
@@ -457,21 +469,20 @@ else:
             }
         """)
 
-        # 숫자 포맷을 적용할 컬럼들 설정
+        # 숫자 포맷 적용
         for col, width in column_widths.items():
-            # if col in ['주문단가', '주문수량', '체결단가', '체결수량', '잔여수량', '취소수량', '주문금액', '체결금액']:
-            if col in ['주문단가', '주문수량', '체결수량', '잔여수량', '취소수량', '주문금액', '체결금액']:    
+            if col in ['주문단가', '주문수량', '체결수량', '잔여수량', '취소수량', '주문금액', '체결금액']:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
             else:
                 gb.configure_column(col, width=width)
 
         grid_options = gb.build()
 
-        # AgGrid를 통해 데이터 출력
+        # AgGrid 출력
         AgGrid(
             df_display,
             gridOptions=grid_options,
-            fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
+            fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
             use_container_width=True,
-        )      
+        )   
