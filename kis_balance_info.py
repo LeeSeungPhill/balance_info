@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 import plotly.graph_objects as go
-from st_aggrid import AgGrid
+from st_aggrid import AgGrid, GridUpdateMode
 from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import JsCode
 
@@ -273,7 +273,7 @@ def get_my_complete(access_token, app_key, app_secret, acct_no, strt_dt, end_dt)
         print("일별주문체결조회 중 오류 발생:", e)
         return []
 
-nickname = ['phills2', 'phills75', 'yh480825', 'phills13', 'phills15']
+nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15']
 # nickname = ['yh480825']
 my_choice = st.selectbox('닉네임을 선택하세요', nickname)   
 
@@ -361,7 +361,22 @@ else:
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
 
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+        
         column_widths = {
             '순서': 40,
             '종목명': 140,
@@ -411,6 +426,9 @@ else:
             fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
             allow_unsafe_jscode=True,
             use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )
 
         df_pie = df0[df0['평가금액'] > 0].copy()
@@ -500,6 +518,21 @@ else:
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
         column_widths = {
             '일자': 80,
@@ -547,6 +580,9 @@ else:
             fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
             allow_unsafe_jscode=True,
             use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )
 
     df01['일자'] = pd.to_datetime(df01['일자'])
@@ -603,6 +639,21 @@ else:
             # 페이지당 20개 표시
             gb.configure_pagination(enabled=True, paginationPageSize=20)
             gb.configure_grid_options(domLayout='normal')
+            # Excel 다운로드를 위한 옵션 추가
+            gb.configure_grid_options(enableRangeSelection=True)
+            gb.configure_grid_options(enableExcelExport=True)
+
+            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+            auto_size_js = JsCode("""
+            function onFirstDataRendered(params) {
+                const allColumnIds = [];
+                params.columnApi.getAllColumns().forEach(function(column) {
+                    allColumnIds.push(column.getId());
+                });
+                params.columnApi.autoSizeColumns(allColumnIds, false);
+            }
+            """)
+            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
             column_widths = {
                 '거래일자': 80,
@@ -654,6 +705,9 @@ else:
                 fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
                 allow_unsafe_jscode=True,
                 use_container_width=True,
+                update_mode=GridUpdateMode.NO_UPDATE,
+                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
             )
 
         df1['거래일자'] = pd.to_datetime(df1['거래일자'], errors='coerce')
@@ -741,6 +795,21 @@ else:
             # 페이지당 20개 표시
             gb.configure_pagination(enabled=True, paginationPageSize=20)
             gb.configure_grid_options(domLayout='normal')
+            # Excel 다운로드를 위한 옵션 추가
+            gb.configure_grid_options(enableRangeSelection=True)
+            gb.configure_grid_options(enableExcelExport=True)
+
+            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+            auto_size_js = JsCode("""
+            function onFirstDataRendered(params) {
+                const allColumnIds = [];
+                params.columnApi.getAllColumns().forEach(function(column) {
+                    allColumnIds.push(column.getId());
+                });
+                params.columnApi.autoSizeColumns(allColumnIds, false);
+            }
+            """)
+            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
             column_widths = {
                 '거래일자': 80,
@@ -788,6 +857,9 @@ else:
                 fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
                 allow_unsafe_jscode=True,
                 use_container_width=True,
+                update_mode=GridUpdateMode.NO_UPDATE,
+                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
             )
 
         # 라디오버튼 선택
@@ -893,6 +965,9 @@ else:
             gridOptions=grid_options,
             fit_columns_on_grid_load=False, 
             allow_unsafe_jscode=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )
 
 # 일별주문체결조회
@@ -956,6 +1031,21 @@ else:
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
         column_widths = {
             '주문일자': 60,
@@ -996,4 +1086,7 @@ else:
             fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
             allow_unsafe_jscode=True,
             use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )      
