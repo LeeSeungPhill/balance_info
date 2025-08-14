@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from st_aggrid import AgGrid
+from st_aggrid import AgGrid, GridUpdateMode
 from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import JsCode
 
@@ -117,18 +117,33 @@ else:
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
         column_widths = {
             '순서': 40,
             '종목명': 140,
-            '매입단가': 80,
-            '매입수량': 70,
+            '매입단가': 100,
+            '매입수량': 100,
             '매입금액': 100,
-            '현재가': 80,
+            '현재가': 100,
             '평가금액': 100,
-            '손익률(%)': 70,
+            '손익률(%)': 80,
             '손익금액': 100,
-            '비중(%)': 70
+            '비중(%)': 80
         }
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
@@ -167,6 +182,9 @@ else:
             fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
             allow_unsafe_jscode=True,
             use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )
 
         df_pie = df0[df0['평가금액'] > 0].copy()
@@ -261,6 +279,21 @@ else:
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
         column_widths = {
             '일자': 80,
@@ -269,7 +302,7 @@ else:
             '평가금액': 100,
             '수익금액': 80,
             '예수금': 100,
-            '예수금비율(%)': 70
+            '예수금비율(%)': 80
         }
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
@@ -308,6 +341,9 @@ else:
             fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
             allow_unsafe_jscode=True,
             use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )
 
     df01['일자'] = pd.to_datetime(df01['일자'])
@@ -336,7 +372,10 @@ select3 = """
 		ord_type,
 		executed_vol,
 		remaining_vol,
-        ord_state
+        ord_state,
+        hold_price,
+        hold_vol,
+        paid_fee
 	FROM trade_mng A, cust_mng B
     WHERE A.cust_num = B.cust_num
     AND B.market_name = %s
@@ -358,7 +397,10 @@ select3 = """
 		ord_type,
 		executed_vol,
 		remaining_vol,
-        ord_state
+        ord_state,
+        hold_price,
+        hold_vol,
+        paid_fee
 	FROM trade_mng_hist A, cust_mng B
     WHERE A.cust_num = B.cust_num
     AND B.market_name = %s
@@ -401,6 +443,10 @@ else:
                 # '체결단가': float(item['avg_prvs']),
                 '체결수량': float(item[10]),
                 '잔여수량': float(item[11]),
+                '보유단가': float(item[13]) if item[13] != None else 0,
+                '보유수량': float(item[14]) if item[14] != None else 0,
+                '수수료': float(item[15]) if item[15] != None else 0,
+                '손실수익금': int((float(item[7])-float(item[13]))*float(item[10])) if item[13] != None else 0,
             })
 
     df4 = pd.DataFrame(data4)
@@ -443,20 +489,39 @@ else:
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
         column_widths = {
-            '주문일자': 60,
-            '주문시각': 60,
+            '주문일자': 80,
+            '주문시각': 80,
             '종목명': 140,
-            '주문상태': 60,
-            '주문번호': 70,
+            '주문상태': 80,
+            '주문번호': 100,
             '주문금액': 100,
             '체결금액': 100,
-            '주문단가': 80,
-            '주문수량': 70,
+            '보유단가': 100,
+            '보유수량': 100,
+            '주문단가': 100,
+            '주문수량': 100,
             # '체결단가': 80,
-            '체결수량': 70,
-            '잔여수량': 70,
+            '체결수량': 100,
+            '잔여수량': 100,
+            '수수료': 70,
+            '손실수익금': 100
         }
 
         # 숫자 포맷 JS
@@ -471,7 +536,7 @@ else:
 
         # 숫자 포맷 적용
         for col, width in column_widths.items():
-            if col in ['주문단가', '주문수량', '체결수량', '잔여수량', '취소수량', '주문금액', '체결금액']:
+            if col in ['보유단가', '보유수량', '주문단가', '주문수량', '체결수량', '잔여수량', '취소수량', '주문금액', '체결금액', '수수료', '손실수익금']:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
             else:
                 gb.configure_column(col, width=width)
@@ -485,4 +550,7 @@ else:
             fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
             use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )   
