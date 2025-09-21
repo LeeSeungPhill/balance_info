@@ -8,7 +8,7 @@ from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import JsCode
 
 # PostgreSQL 연결 설정
-conn_string = "dbname='universe' host='192.168.50.248' port='5432' user='postgres' password='asdf1234'"
+conn_string = "dbname='universe' host='localhost' port='5432' user='postgres' password='asdf1234'"
 
 # DB 연결
 conn = db.connect(conn_string)
@@ -71,7 +71,7 @@ else:
             '매입금액': float(item[6]),
             '현재가': float(item[11]),
             '평가금액': float(item[12]),
-            '손익률(%)': item[7],
+            '손익률(%)': float(item[7]) if item[7] is not None else 0.0,
             '손익금액': float(item[12]) - float(item[6]),
         })     
 
