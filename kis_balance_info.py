@@ -10,11 +10,18 @@ import plotly.graph_objects as go
 from st_aggrid import AgGrid, GridUpdateMode
 from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import JsCode
+import sys
+import websockets
+import math
+import asyncio
+from dateutil.relativedelta import relativedelta
 
 URL_BASE = "https://openapi.koreainvestment.com:9443"       # 실전서비스
+KW_URL_BASE = "https://api.kiwoom.com"    
+SOCKET_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"  # 접속 URL
 
 # PostgreSQL 연결 설정
-# conn_string = "dbname='fund_risk_mng' host='192.168.50.248' port='5432' user='postgres' password='asdf1234'"
+# conn_string = "dbname='fund_risk_mng' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
 conn_string = "dbname='fund_risk_mng' host='localhost' port='5432' user='postgres' password='sktl2389!1'"
 # DB 연결
 conn = db.connect(conn_string)
@@ -55,7 +62,7 @@ def account(nickname):
     if diff.days >= 1 or result_two[5] != today:  # 토큰 유효기간(1일) 만료 재발급
         access_token = auth(app_key, app_secret)
         token_publ_date = datetime.now().strftime("%Y%m%d%H%M%S")
-        print("new access_token : " + access_token)
+        print("new access_token1 : " + access_token)
         # 계정정보 토큰값 변경
         cur02 = conn.cursor()
         update_query = "update \"stockAccount_stock_account\" set access_token = %s, token_publ_date = %s, last_chg_date = %s where acct_no = %s"
@@ -272,6 +279,36 @@ def get_my_complete(access_token, app_key, app_secret, acct_no, strt_dt, end_dt)
     except Exception as e:
         print("일별주문체결조회 중 오류 발생:", e)
         return []
+    
+# 주식예약주문조회 : 15시 40분 ~ 다음 영업일 07시 30분까지 가능(23시 40분 ~ 0시 10분까지 서버초기화 작업시간 불가)
+def order_reserve_complete(access_token, app_key, app_secret, reserce_strt_dt, reserve_end_dt, acct_no, code):
+
+    headers = {"Content-Type": "application/json",
+               "authorization": f"Bearer {access_token}",
+               "appKey": app_key,
+               "appSecret": app_secret,
+               "tr_id": "CTSC0004R",                                # tr_id : CTSC0004R
+    }  
+    params = {
+                "RSVN_ORD_ORD_DT": reserce_strt_dt,                 # 예약주문시작일자
+                "RSVN_ORD_END_DT": reserve_end_dt,                  # 예약주문종료일자
+                "RSVN_ORD_SEQ": "",                                 # 예약주문순번
+                "TMNL_MDIA_KIND_CD": "00",
+                "CANO": acct_no,
+                "ACNT_PRDT_CD": '01',
+                "PRCS_DVSN_CD": "0",                                # 처리구분코드 : 전체 0, 처리내역 1, 미처리내역 2
+                "CNCL_YN": "Y",                                     # 취소여부 : 'Y'
+                "PDNO": code if code != "" else "",                 # 종목코드 : 공백 입력 시 전체 조회
+                "SLL_BUY_DVSN_CD": "",                              # 매도매수구분코드 : 01 매도, 02 매수        
+                "CTX_AREA_FK200": "",                               
+                "CTX_AREA_NK200": "",                               
+    }
+    PATH = "uapi/domestic-stock/v1/trading/order-resv-ccnl"
+    URL = f"{URL_BASE}/{PATH}"
+    res = requests.get(URL, headers=headers, params=params, verify=False)
+    ar = resp.APIResp(res)
+    #ar.printAll()
+    return ar.getBody().output    
 
 nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15']
 # nickname = ['yh480825']
@@ -1089,4 +1126,509 @@ else:
             update_mode=GridUpdateMode.NO_UPDATE,
             enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
             excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-        )      
+        )
+
+reserce_strt_dt = datetime.now().strftime("%Y%m%d")
+reserve_end_dt = (datetime.now() + relativedelta(months=1)).strftime("%Y%m%d")
+# 전체예약 조회
+output = order_reserve_complete(access_token, app_key, app_secret, reserce_strt_dt, reserve_end_dt, str(acct_no), "")
+
+if len(output) > 0:
+    tdf = pd.DataFrame(output)
+    tdf.set_index('rsvn_ord_seq')
+    d = tdf[['rsvn_ord_seq', 'rsvn_ord_ord_dt', 'rsvn_ord_rcit_dt', 'pdno', 'ord_dvsn_cd', 'ord_rsvn_qty', 'tot_ccld_qty', 'cncl_ord_dt', 'ord_tmd', 'odno', 'rsvn_ord_rcit_tmd', 'kor_item_shtn_name', 'sll_buy_dvsn_cd', 'ord_rsvn_unpr', 'tot_ccld_amt', 'cncl_rcit_tmd', 'prcs_rslt', 'ord_dvsn_name', 'rsvn_end_dt']]
+    reserve_data = []
+
+    for i, name in enumerate(d.index):
+        d_rsvn_ord_seq = int(d['rsvn_ord_seq'][i])          # 예약주문 순번
+        d_rsvn_ord_ord_dt = d['rsvn_ord_ord_dt'][i]         # 예약주문주문일자
+        d_rsvn_ord_rcit_dt = d['rsvn_ord_rcit_dt'][i]       # 예약주문접수일자
+        d_code = d['pdno'][i]
+        d_ord_dvsn_cd = d['ord_dvsn_cd'][i]                 # 주문구분코드
+        d_ord_rsvn_qty = int(d['ord_rsvn_qty'][i])          # 주문예약수량
+        d_tot_ccld_qty = int(d['tot_ccld_qty'][i])          # 총체결수량
+        d_cncl_ord_dt = d['cncl_ord_dt'][i]                 # 취소주문일자
+        d_ord_tmd = d['ord_tmd'][i]                         # 주문시각
+        d_order_no = d['odno'][i]                           # 주문번호
+        d_rsvn_ord_rcit_tmd = d['rsvn_ord_rcit_tmd'][i]     # 예약주문접수시각
+        d_name = d['kor_item_shtn_name'][i]                 # 종목명
+        d_sll_buy_dvsn_cd = d['sll_buy_dvsn_cd'][i]         # 매도매수구분코드
+        d_ord_rsvn_unpr = int(d['ord_rsvn_unpr'][i])        # 주문예약단가
+        d_tot_ccld_amt = int(d['tot_ccld_amt'][i])          # 총체결금액
+        d_cncl_rcit_tmd = d['cncl_rcit_tmd'][i]             # 취소접수시각
+        d_prcs_rslt = d['prcs_rslt'][i]                     # 처리결과
+        d_ord_dvsn_name = d['ord_dvsn_name'][i]             # 주문구분명
+        d_rsvn_end_dt = d['rsvn_end_dt'][i]                 # 예약종료일자
+
+        reserve_data.append({
+            '종목명': d_name,
+            '예약시작일': d_rsvn_ord_ord_dt,
+            '예약종료일': d_rsvn_end_dt,
+            '예약구분': d_ord_dvsn_name,
+            '예약번호': str(d_rsvn_ord_seq),
+            '예약단가': d_ord_rsvn_unpr,
+            '예약수량': d_ord_rsvn_qty,
+            '처리여부': d_prcs_rslt,
+        })
+    
+    reserve_df = pd.DataFrame(reserve_data)
+
+    if reserve_df.empty:
+        st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
+    else:
+        # Streamlit 앱 구성
+        st.title("예약정보 조회")
+        
+        all_types = reserve_df['예약구분'].unique()
+        예약구분리스트 = [t for t in all_types if t in ('현금매수', '현금매도')]
+        선택예약구분 = st.selectbox("예약구분을 선택하세요", 예약구분리스트)
+
+        선택예약구분_df = reserve_df[reserve_df['예약구분'] == 선택예약구분].copy()
+
+        선택예약구분_df['예약시작일'] = pd.to_datetime(선택예약구분_df['예약시작일'], format='%Y%m%d').dt.strftime('%Y/%m/%d')
+        선택예약구분_df['예약종료일'] = pd.to_datetime(선택예약구분_df['예약종료일'], format='%Y%m%d').dt.strftime('%Y/%m/%d')
+
+        df_display = 선택예약구분_df.sort_values(by=['예약시작일', '예약종료일'], ascending=False).copy().reset_index(drop=True)
+
+        # Grid 옵션 생성
+        gb = GridOptionsBuilder.from_dataframe(df_display)
+        # 예약구분 컬럼 숨기기
+        gb.configure_column('예약구분', hide=True)
+        # 페이지당 20개 표시
+        gb.configure_pagination(enabled=True, paginationPageSize=20)
+        gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+
+        column_widths = {
+            '예약시작일': 60,
+            '예약종료일': 60,
+            '종목명': 140,
+            '예약번호': 70,
+            '예약단가': 80,
+            '예약수량': 70,
+            '처리여부': 70,
+        }
+
+        # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+        number_format_js = JsCode("""
+            function(params) {
+                if (params.value === null || params.value === undefined) {
+                    return '';
+                }
+                return params.value.toLocaleString();
+            }
+        """)
+
+        # 숫자 포맷을 적용할 컬럼들 설정
+        for col, width in column_widths.items():
+            if col in ['예약단가', '예약수량']:
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+            else:
+                gb.configure_column(col, width=width)
+
+        grid_options = gb.build()
+
+        # AgGrid를 통해 데이터 출력
+        AgGrid(
+            df_display,
+            gridOptions=grid_options,
+            fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
+            allow_unsafe_jscode=True,
+            use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+        )
+
+else:
+    print("전체예약 조회 결과가 없습니다.")
+
+def kw_auth(APP_KEY, APP_SECRET):
+
+    params = {
+		'grant_type': 'client_credentials',  # grant_type
+		'appkey': APP_KEY,  # 앱키
+		'secretkey': APP_SECRET,  # 시크릿키
+	}
+
+    # 인증처리
+    PATH = 'oauth2/token'
+    url = f"{KW_URL_BASE}/{PATH}"
+
+    headers = {
+		'Content-Type': 'application/json;charset=UTF-8', # 컨텐츠타입
+	}
+
+	# 3. http POST 요청
+    response  = requests.post(url, headers=headers, json=params)
+
+    return response.json()["token"]
+
+async def kw_account(nickname):
+
+    cur01 = conn.cursor()
+    cur01.execute("select acct_no, access_token, app_key, app_secret, token_publ_date, substr(token_publ_date, 0, 9) AS token_day from \"stockAccount_stock_account\" where nick_name = '" + nickname + "'")
+    result_two = cur01.fetchone()
+    cur01.close()
+
+    acct_no = result_two[0]
+    access_token = result_two[1]
+    app_key = result_two[2]
+    app_secret = result_two[3]
+    today = datetime.now().strftime("%Y%m%d")
+
+    YmdHMS = datetime.now()
+    validTokenDate = datetime.strptime(result_two[4], '%Y%m%d%H%M%S')
+    diff = YmdHMS - validTokenDate
+    # print("diff : " + str(diff.days))
+    if diff.days >= 1 or result_two[5] != today:  # 토큰 유효기간(1일) 만료 재발급
+        access_token = kw_auth(app_key, app_secret)
+        token_publ_date = datetime.now().strftime("%Y%m%d%H%M%S")
+        print("new access_token2 : " + access_token)
+        # 계정정보 토큰값 변경
+        cur02 = conn.cursor()
+        update_query = "update \"stockAccount_stock_account\" set access_token = %s, token_publ_date = %s, last_chg_date = %s where acct_no = %s"
+        # update 인자값 설정
+        record_to_update = ([access_token, token_publ_date, datetime.now(), acct_no])
+        # DB 연결된 커서의 쿼리 수행
+        cur02.execute(update_query, record_to_update)
+        conn.commit()
+        cur02.close()
+
+    # WebSocketClient 전역 변수 선언
+    websocket_client = WebSocketClient(SOCKET_URL, access_token)
+    await websocket_client.run()   
+
+class WebSocketClient:
+    def __init__(self, uri, access_token):
+        self.uri = uri
+        self.access_token = access_token
+        self.websocket = None
+        self.connected = False
+        self.keep_running = True
+        self.condition_list = []  # 조건검색 목록 저장
+        self.search_results = []  # 조건검색 결과 저장
+
+    # WebSocket 서버에 연결합니다.
+    async def connect(self):
+        try:
+            self.websocket = await websockets.connect(self.uri)
+            self.connected = True
+            print("서버와 연결을 시도 중입니다.")
+
+            # 로그인 패킷
+            param = {
+                'trnm': 'LOGIN',
+                'token': self.access_token
+            }
+
+            print('실시간 시세 서버로 로그인 패킷을 전송합니다.')
+            # 웹소켓 연결 시 로그인 정보 전달
+            await self.send_message(message=param)
+
+        except Exception as e:
+            print(f'Connection error: {e}')
+            self.connected = False
+
+    # 서버에 메시지를 보냅니다. 연결이 없다면 자동으로 연결합니다.
+    async def send_message(self, message):
+        if not self.connected:
+            await self.connect()  # 연결이 끊어졌다면 재연결
+        if self.connected:
+            # message가 문자열이 아니면 JSON으로 직렬화
+            if not isinstance(message, str):
+                message = json.dumps(message)
+
+            await self.websocket.send(message)
+            print(f'Message sent: {message}')
+
+    # 서버에서 오는 메시지를 수신하여 출력합니다.
+    async def receive_messages(self):
+        while self.keep_running:
+            try:
+                message = await self.websocket.recv()
+                if not message:
+                    print('수신된 메시지가 없습니다. 연결이 종료되었을 수 있습니다.')
+                    self.connected = False
+                    await self.websocket.close()
+                    break
+
+                try:
+                    response = json.loads(message)
+                except json.JSONDecodeError:
+                    print(f'JSON 디코딩 오류: {message}')
+                    continue
+
+                trnm = response.get('trnm')
+
+                # 메시지 유형이 LOGIN일 경우 로그인 시도 결과 체크
+                if trnm == 'LOGIN':
+                    if response.get('return_code') != 0:
+                        print('로그인 실패하였습니다. : ', response.get('return_msg'))
+                        await self.disconnect()
+                    else:
+                        print('로그인 성공하였습니다.')
+                        await self.send_message({'trnm': 'CNSRLST'})
+
+                elif trnm == 'CNSRLST':
+                    self.condition_list = response.get('data', [])
+                    # print(f'조건검색 목록 수신: {self.condition_list}')
+                    if self.condition_list:
+                        # 다섯번째 조건검색식: 파워급등주
+                        seq5 = self.condition_list[5][0]
+                        self.power_rapid_name = self.condition_list[5][1]  # 파워급등주 이름 저장
+                        await self.send_message({
+                            'trnm': 'CNSRREQ',
+                            'seq': seq5,
+                            'search_type': '0',
+                            'stex_tp': 'K',
+                            'cont_yn': 'N',
+                            'next_key': '',
+                        })
+                        # 여섯번째 조건검색식: 파워종목
+                        seq6 = self.condition_list[6][0]
+                        self.power_item_name = self.condition_list[6][1]  # 파워종목 이름 저장
+                        await self.send_message({
+                            'trnm': 'CNSRREQ',
+                            'seq': seq6,
+                            'search_type': '0',
+                            'stex_tp': 'K',
+                            'cont_yn': 'N',
+                            'next_key': '',
+                        })
+
+                elif trnm == 'CNSRREQ':
+                    self.search_results = response.get('data', [])
+                    # print(f'조건검색 결과 수신: {self.search_results}')
+                    seq = response.get('seq', '').strip()  # 시퀀스 번호로 구분
+
+                    if seq == self.condition_list[5][0]:  # 파워급등주 결과
+                        # print(f'{self.power_rapid_name}')
+                        # print(f'{self.power_rapid_name}-{self.search_results}')
+                        search_data = []
+                        for i in self.search_results:
+                            code = i['9001'][1:] if i['9001'].startswith('A') else i['9001']
+                            name = i['302']
+                            current_price = math.ceil(float(i['10']))
+                            rate = float(i['12']) / 1000
+                            vol = math.ceil(float(i['13']))
+                            high_price = math.ceil(float(i['17']))
+                            low_price = math.ceil(float(i['18']))
+                            search_data.append({
+                                '종목명': name,
+                                '종목코드': code,
+                                '현재가': current_price,
+                                '거래량': vol,
+                                '고가': high_price,
+                                '저가': low_price,
+                                '등락율': rate,
+                            })
+                            # print(f"{name} [{code}] 현재가: {format(current_price, ',d')}원, 거래량: {format(vol, ',d')}주, 고가: {format(high_price, ',d')}원, 저가: {format(low_price, ',d')}원, 등락율: {rate:.2f}%")
+                            
+                        search_df = pd.DataFrame(search_data)
+
+                        if search_df.empty:
+                            st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
+                        else:
+                            # Streamlit 앱 구성
+                            st.title(self.power_rapid_name)
+
+                            df_display = search_df.copy().reset_index(drop=True)
+
+                            # Grid 옵션 생성
+                            gb = GridOptionsBuilder.from_dataframe(df_display)
+                            # 페이지당 20개 표시
+                            gb.configure_pagination(enabled=True, paginationPageSize=20)
+                            gb.configure_grid_options(domLayout='normal')
+                            # Excel 다운로드를 위한 옵션 추가
+                            gb.configure_grid_options(enableRangeSelection=True)
+                            gb.configure_grid_options(enableExcelExport=True)
+
+                            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+                            auto_size_js = JsCode("""
+                            function onFirstDataRendered(params) {
+                                const allColumnIds = [];
+                                params.columnApi.getAllColumns().forEach(function(column) {
+                                    allColumnIds.push(column.getId());
+                                });
+                                params.columnApi.autoSizeColumns(allColumnIds, false);
+                            }
+                            """)
+                            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+
+                            column_widths = {
+                                '종목명': 140,
+                                '종목코드': 80,
+                                '현재가': 100,
+                                '거래량': 120,
+                                '고가': 100,
+                                '저가': 100,
+                                '등락율': 80,
+                            }
+
+                            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+                            number_format_js = JsCode("""
+                                function(params) {
+                                    if (params.value === null || params.value === undefined) {
+                                        return '';
+                                    }
+                                    return params.value.toLocaleString();
+                                }
+                            """)
+
+                            # 숫자 포맷을 적용할 컬럼들 설정
+                            for col, width in column_widths.items():
+                                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+
+                            grid_options = gb.build()
+
+                            # AgGrid를 통해 데이터 출력
+                            AgGrid(
+                                df_display,
+                                gridOptions=grid_options,
+                                fit_columns_on_grid_load=False, 
+                                allow_unsafe_jscode=True,
+                                update_mode=GridUpdateMode.NO_UPDATE,
+                                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+                            )
+
+                    elif seq == self.condition_list[6][0]:  # 파워종목 결과
+                        # print(f'{self.power_item_name}')
+                        # print(f'{self.power_item_name}-{self.search_results}')
+                        search_data = []
+                        for i in self.search_results:
+                            code = i['9001'][1:] if i['9001'].startswith('A') else i['9001']
+                            name = i['302']
+                            current_price = math.ceil(float(i['10']))
+                            rate = float(i['12']) / 1000
+                            vol = math.ceil(float(i['13']))
+                            high_price = math.ceil(float(i['17']))
+                            low_price = math.ceil(float(i['18']))
+                            search_data.append({
+                                '종목명': name,
+                                '종목코드': code,
+                                '현재가': current_price,
+                                '거래량': vol,
+                                '고가': high_price,
+                                '저가': low_price,
+                                '등락율': rate,
+                            })
+                            # print(f"{name} [{code}] 현재가: {format(current_price, ',d')}원, 거래량: {format(vol, ',d')}주, 고가: {format(high_price, ',d')}원, 저가: {format(low_price, ',d')}원, 등락율: {rate:.2f}%")
+
+                        search_df = pd.DataFrame(search_data)
+
+                        if search_df.empty:
+                            st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
+                        else:
+                            # Streamlit 앱 구성
+                            st.title(self.power_item_name)
+
+                            df_display = search_df.copy().reset_index(drop=True)
+
+                            # Grid 옵션 생성
+                            gb = GridOptionsBuilder.from_dataframe(df_display)
+                            # 페이지당 20개 표시
+                            gb.configure_pagination(enabled=True, paginationPageSize=20)
+                            gb.configure_grid_options(domLayout='normal')
+                            # Excel 다운로드를 위한 옵션 추가
+                            gb.configure_grid_options(enableRangeSelection=True)
+                            gb.configure_grid_options(enableExcelExport=True)
+
+                            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+                            auto_size_js = JsCode("""
+                            function onFirstDataRendered(params) {
+                                const allColumnIds = [];
+                                params.columnApi.getAllColumns().forEach(function(column) {
+                                    allColumnIds.push(column.getId());
+                                });
+                                params.columnApi.autoSizeColumns(allColumnIds, false);
+                            }
+                            """)
+                            gb.configure_grid_options(onFirstDataRendered=auto_size_js)                            
+
+                            column_widths = {
+                                '종목명': 140,
+                                '종목코드': 80,
+                                '현재가': 100,
+                                '거래량': 120,
+                                '고가': 100,
+                                '저가': 100,
+                                '등락율': 80,
+                            }
+
+                            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+                            number_format_js = JsCode("""
+                                function(params) {
+                                    if (params.value === null || params.value === undefined) {
+                                        return '';
+                                    }
+                                    return params.value.toLocaleString();
+                                }
+                            """)
+
+                            # 숫자 포맷을 적용할 컬럼들 설정
+                            for col, width in column_widths.items():
+                                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+
+                            grid_options = gb.build()
+
+                            # AgGrid를 통해 데이터 출력
+                            AgGrid(
+                                df_display,
+                                gridOptions=grid_options,
+                                fit_columns_on_grid_load=False, 
+                                allow_unsafe_jscode=True,
+                                update_mode=GridUpdateMode.NO_UPDATE,
+                                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+                            )
+
+                # 메시지 유형이 PING일 경우 수신값 그대로 송신
+                elif response.get('trnm') == 'PING':
+                    # await self.send_message(response)
+                    await self.websocket.close()
+                    self.keep_running = False
+                    self.connected = False
+                    sys.exit(0)
+
+                else:
+                    print(f'실시간 시세 서버 응답 수신: {response}')
+
+            except websockets.ConnectionClosed:
+                print('서버에 의해 연결이 종료되었습니다.')
+                self.connected = False
+                break
+            except Exception as e:
+                print(f'예외 발생: {e}')
+                self.connected = False
+                break        
+
+    # WebSocket 실행
+    async def run(self):
+        await self.connect()
+        await self.receive_messages()
+
+    # WebSocket 연결 종료
+    async def disconnect(self):
+        self.keep_running = False
+        if self.connected and self.websocket:
+            await self.websocket.close()
+            self.connected = False
+            print('Disconnected from WebSocket server')            
+
+asyncio.run(kw_account('kwphills75'))
