@@ -808,7 +808,7 @@ def get_my_complete(access_token, app_key, app_secret, acct_no, strt_dt, end_dt)
             'INQR_DVSN': "00",          # 조회구분 00 역순, 01 정순
             'INQR_DVSN_1': "",          # 조회구분1 없음: 전체, 1: ELW, 2: 프리보드
             'INQR_DVSN_3': "00",        # 조회구분3 00 전체, 01 현금, 02 신용, 03 담보, 04 대주, 05 대여, 06 자기융자신규/상환, 07 유통융자신규/상환
-            'EXCG_ID_DVSN_CD': "KRX",   # 거래소ID구분코드 KRX : KRX, NXT : NXT
+            'EXCG_ID_DVSN_CD': "ALL",   # 거래소ID구분코드 KRX : KRX, NXT : NXT, SOR (Smart Order Routing) : SOR, ALL : 전체
             'CTX_AREA_NK100': "",
             'CTX_AREA_FK100': "" 
     }
