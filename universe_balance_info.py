@@ -26,7 +26,7 @@ kis_conn_string = "dbname='fund_risk_mng' host='localhost' port='5432' user='pos
 # DB 연결
 kis_conn = db.connect(kis_conn_string)
 
-kis_nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15']
+kis_nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong']
 # kis_nickname = ['yh480825']  
 
 # PostgreSQL 연결 설정

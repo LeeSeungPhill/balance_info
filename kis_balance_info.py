@@ -310,7 +310,7 @@ def order_reserve_complete(access_token, app_key, app_secret, reserce_strt_dt, r
     #ar.printAll()
     return ar.getBody().output    
 
-nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15']
+nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong']
 # nickname = ['yh480825']
 my_choice = st.selectbox('닉네임을 선택하세요', nickname)   
 
