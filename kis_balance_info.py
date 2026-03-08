@@ -632,6 +632,150 @@ else:
     
     st.line_chart(df01[['전체금액']])       
 
+cur04 = conn.cursor()
+trading_trail = """
+    SELECT 
+        trail_day,
+        name,
+        COALESCE(SUM(CASE WHEN trail_tp = '3' THEN 
+            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+        END), 0)                                                       AS 안전마진_수익합계,
+        COALESCE(SUM(CASE WHEN trail_tp = '4' THEN 
+            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+        END), 0)                                                       AS 전량매도_수익합계,
+        COALESCE(SUM(
+            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+        ), 0)                                                          AS 전체_수익합계,
+        COALESCE(AVG(trail_rate), 0)                                   AS 전체_평균수익률,
+        SUM(COALESCE(SUM(
+            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+        ), 0)) OVER (
+            ORDER BY trail_day ASC, name ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        )                                                               AS 누적수익합계
+    FROM public.trading_trail
+    WHERE trail_tp IN ('3', '4') AND acct_no = %s AND trail_day BETWEEN %s AND %s
+    GROUP BY trail_day, name
+    ORDER BY trail_day DESC, name                        
+    """                    
+
+cur04.execute(trading_trail, (acct_no, strt_dt, end_dt))
+result_four = cur04.fetchall()
+cur04.close()
+
+data02 = []
+for item in result_four:
+
+    전체금액 = float(item[0]) + float(item[2])  # 예수금 + 평가금액
+    예수금 = float(item[0])
+
+    data02.append({
+        '일자': item[0],
+        '종목': item[1],
+        '안전마진수익': float(item[2]),
+        '전량매도수익': float(item[3]),
+        '전체수익금액': float(item[4]),
+        '전체수익평균(%)': float(item[5]),
+        '전체누적수익': float(item[6]),
+    })
+
+df02 = pd.DataFrame(data02)
+
+if df02.empty:
+    st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
+else:
+    # Streamlit 앱 구성
+    st.title("기간별 수익현황 조회")
+
+    df02['일자'] = pd.to_datetime(df02['일자']).dt.strftime('%Y-%m-%d')
+
+    # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
+    if st.button('기간별 수익현황 상세 데이터'):
+
+        df_display = df02.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
+
+        # Grid 옵션 생성
+        gb = GridOptionsBuilder.from_dataframe(df_display)
+        # 페이지당 20개 표시
+        gb.configure_pagination(enabled=True, paginationPageSize=20)
+        gb.configure_grid_options(domLayout='normal')
+        # Excel 다운로드를 위한 옵션 추가
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
+
+        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+
+        column_widths = {
+            '일자': 80,
+            '종목': 100,
+            '안전마진수익': 100,
+            '전량매도수익': 100,
+            '전체수익금액': 100,
+            '전체수익평균(%)': 70,
+            '전체누적수익': 100,
+        }
+
+        # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+        number_format_js = JsCode("""
+            function(params) {
+                if (params.value === null || params.value === undefined) {
+                    return '';
+                }
+                return params.value.toLocaleString();
+            }
+        """)
+
+        percent_format_js = JsCode("""
+            function(params) {
+                if (params.value === null || params.value === undefined) {
+                    return '';
+                }
+                return params.value.toFixed(2) + '%';
+            }
+        """)
+
+        for col, width in column_widths.items():
+            if col in ['전체수익평균(%)',]:
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
+            elif col in ['안전마진수익', '전량매도수익', '전체수익금액', '전체누적수익']:
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+            else:
+                gb.configure_column(col, width=width)
+
+        grid_options = gb.build()
+
+        # AgGrid를 통해 데이터 출력
+        AgGrid(
+            df_display,
+            gridOptions=grid_options,
+            fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
+            allow_unsafe_jscode=True,
+            use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+        )
+
+    df02['일자'] = pd.to_datetime(df02['일자'])
+    df02 = df02.dropna(subset=['일자'])               
+    df02 = df02.sort_values(by='일자')
+    df02 = df02[df02['전체금액'] != 0]
+    # 인덱스를 'YYYY-MM-DD' 문자열로 포맷
+    df02['일자_str'] = df02['일자'].dt.strftime('%Y-%m-%d')
+    df02.set_index('일자_str', inplace=True)                
+    
+    st.line_chart(df02[['전체누적수익']])
+
 # 기간별매매손익현황조회
 result1 = inquire_period_trade_profit(access_token, app_key, app_secret, code, strt_dt, end_dt)   
 
