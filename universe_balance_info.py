@@ -1329,7 +1329,7 @@ else:
     df02['일자'] = pd.to_datetime(df02['일자'])
     df02 = df02.dropna(subset=['일자'])               
     df02 = df02.sort_values(by='일자')
-    df02 = df02[df02['전체금액'] != 0]
+    df02 = df02[df02['전체수익금액'] != 0]
     # 인덱스를 'YYYY-MM-DD' 문자열로 포맷
     df02['일자_str'] = df02['일자'].dt.strftime('%Y-%m-%d')
     df02.set_index('일자_str', inplace=True)                
