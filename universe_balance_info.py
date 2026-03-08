@@ -1176,7 +1176,7 @@ else:
     
     st.line_chart(kis_df01[['전체금액']])       
 
-cur04 = conn.cursor()
+cur04 = kis_conn.cursor()
 trading_trail = """
     SELECT 
         trail_day,
@@ -1229,12 +1229,12 @@ if df02.empty:
     st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
     # Streamlit 앱 구성
-    st.title("기간별 수익현황 조회")
+    st.title("KIS 기간별 수익현황 조회")
 
     df02['일자'] = pd.to_datetime(df02['일자']).dt.strftime('%Y-%m-%d')
 
     # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-    if st.button('기간별 수익현황 상세 데이터'):
+    if st.button('KIS 기간별 수익현황 상세 데이터'):
 
         df_display = df02.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
