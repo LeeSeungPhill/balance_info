@@ -634,29 +634,45 @@ else:
 
 cur04 = conn.cursor()
 trading_trail = """
-    SELECT 
+    WITH base AS (
+        SELECT
+            trail_day,
+            name,
+            COALESCE(SUM(CASE WHEN trail_tp = '3' THEN
+                (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+            END), 0)                                                        AS 안전마진_수익합계,
+            COALESCE(SUM(CASE WHEN trail_tp = '4' THEN
+                (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+            END), 0)                                                        AS 전량매도_수익합계,
+            COALESCE(SUM(
+                (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
+            ), 0)                                                           AS 전체_수익합계,
+            COALESCE(AVG(trail_rate), 0)                                    AS 전체_평균수익률
+        FROM public.trading_trail
+        WHERE trail_tp IN ('3', '4')
+        AND acct_no = %s
+        AND trail_day BETWEEN %s AND %s
+        GROUP BY name, trail_day
+    ),
+    ranked AS (
+        SELECT *,
+            ROW_NUMBER() OVER (ORDER BY trail_day DESC, name) AS rn
+        FROM base
+    )
+    SELECT
         trail_day,
         name,
-        COALESCE(SUM(CASE WHEN trail_tp = '3' THEN 
-            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-        END), 0)                                                       AS 안전마진_수익합계,
-        COALESCE(SUM(CASE WHEN trail_tp = '4' THEN 
-            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-        END), 0)                                                       AS 전량매도_수익합계,
-        COALESCE(SUM(
-            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-        ), 0)                                                          AS 전체_수익합계,
-        COALESCE(AVG(trail_rate), 0)                                   AS 전체_평균수익률,
-        SUM(COALESCE(SUM(
-            (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-        ), 0)) OVER (
-            ORDER BY trail_day ASC, name ASC
+        안전마진_수익합계,
+        전량매도_수익합계,
+        전체_수익합계,
+        전체_평균수익률,
+        -- ── 아래행부터 위로 올라가며 누적 (rn 큰값 → 작은값 방향) ──
+        SUM(전체_수익합계) OVER (
+            ORDER BY rn DESC
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         )                                                               AS 누적수익합계
-    FROM public.trading_trail
-    WHERE trail_tp IN ('3', '4') AND acct_no = %s AND trail_day BETWEEN %s AND %s
-    GROUP BY trail_day, name
-    ORDER BY trail_day DESC, name                        
+    FROM ranked
+    ORDER BY trail_day DESC, name                       
     """                    
 
 cur04.execute(trading_trail, (acct_no, strt_dt, end_dt))
@@ -676,7 +692,7 @@ for item in result_four:
         '전량매도수익': float(item[3]),
         '전체수익금액': float(item[4]),
         '전체수익평균(%)': float(item[5]),
-        '전체누적수익': float(item[6]),
+        '누적수익합계': float(item[6]),
     })
 
 df02 = pd.DataFrame(data02)
@@ -685,12 +701,12 @@ if df02.empty:
     st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
     # Streamlit 앱 구성
-    st.title("기간별 수익현황 조회")
+    st.title("기간별 누적수익합계")
 
     df02['일자'] = pd.to_datetime(df02['일자']).dt.strftime('%Y-%m-%d')
 
     # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-    if st.button('기간별 수익현황 상세 데이터'):
+    if st.button('기간별 누적수익합계 상세 데이터'):
 
         df_display = df02.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
@@ -722,7 +738,7 @@ else:
             '전량매도수익': 100,
             '전체수익금액': 100,
             '전체수익평균(%)': 70,
-            '전체누적수익': 100,
+            '누적수익합계': 100,
         }
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
@@ -747,7 +763,7 @@ else:
         for col, width in column_widths.items():
             if col in ['전체수익평균(%)',]:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-            elif col in ['안전마진수익', '전량매도수익', '전체수익금액', '전체누적수익']:
+            elif col in ['안전마진수익', '전량매도수익', '전체수익금액', '누적수익합계']:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
             else:
                 gb.configure_column(col, width=width)
@@ -774,7 +790,7 @@ else:
     df02['일자_str'] = df02['일자'].dt.strftime('%Y-%m-%d')
     df02.set_index('일자_str', inplace=True)                
     
-    st.line_chart(df02[['전체누적수익']])
+    st.line_chart(df02[['누적수익합계']])
 
 # 기간별매매손익현황조회
 result1 = inquire_period_trade_profit(access_token, app_key, app_secret, code, strt_dt, end_dt)   
