@@ -1177,7 +1177,7 @@ else:
     st.line_chart(kis_df01[['전체금액']])       
 
 try:
-    cur04 = conn.cursor()
+    cur04 = kis_conn.cursor()
     trading_trail = """
         WITH base AS (
             SELECT
@@ -1335,11 +1335,11 @@ try:
         st.line_chart(df02[['누적수익합계']])
 
 except Exception as e:
-    conn.rollback()
+    kis_conn.rollback()
     print(f"기간별 추적매매 누적수익합계 조회 중 오류 발생 (스킵): {e}")
 
 # 기간별 수익합계
-cur05 = conn.cursor()
+cur05 = kis_conn.cursor()
 period_profit_sum = """
     WITH base AS (
         SELECT
