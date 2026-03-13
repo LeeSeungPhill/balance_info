@@ -701,12 +701,12 @@ if df02.empty:
     st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
     # Streamlit 앱 구성
-    st.title("기간별 누적수익합계")
+    st.title("기간별 추적매매 누적수익합계")
 
     df02['일자'] = pd.to_datetime(df02['일자']).dt.strftime('%Y-%m-%d')
 
     # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-    if st.button('기간별 누적수익합계 상세 데이터'):
+    if st.button('기간별 추적매매 누적수익합계 상세 데이터'):
 
         df_display = df02.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
@@ -792,312 +792,201 @@ else:
     
     st.line_chart(df02[['누적수익합계']])
 
-# 기간별매매손익현황조회
-result1 = inquire_period_trade_profit(access_token, app_key, app_secret, code, strt_dt, end_dt)   
+# 기간별 수익합계
+cur05 = conn.cursor()
+period_profit_sum = """
+    WITH base AS (
+        SELECT
+            AA.dt,
+            AA.tot_evlu_amt,
+            AA.evlu_pfls_amt,
+            AA.prvs_excc_amt                                                AS 현금,
+            (SELECT SUM((A.order_price::numeric - A.hold_price::numeric) * A.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" A
+             WHERE A.acct_no = AA.acct::int
+               AND A.order_dt = AA.dt
+               AND A.order_type LIKE '%%매도%%'
+               AND A.total_complete_qty::int > 0
+            )                                                               AS 손수익,
+            (SELECT SUM(B.order_price::numeric * B.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" B
+             WHERE B.acct_no = AA.acct::int
+               AND B.order_dt = AA.dt
+               AND B.order_type LIKE '%%매수%%'
+               AND B.total_complete_qty::int > 0
+            )                                                               AS 매수총액,
+            (SELECT SUM(C.order_price::numeric * C.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" C
+             WHERE C.acct_no = AA.acct::int
+               AND C.order_dt = AA.dt
+               AND C.order_type LIKE '%%매도%%'
+               AND C.total_complete_qty::int > 0
+            )                                                               AS 매도총액,
+            (SELECT SUM(eval_sum) FROM public.dly_stock_balance D
+             WHERE D.dt = AA.dt AND D.acct = AA.acct
+               AND (D.trading_plan IS NULL OR D.trading_plan NOT IN ('i', 'h'))
+            )                                                               AS 트레이딩총액,
+            (SELECT SUM(eval_sum) FROM public.dly_stock_balance D
+             WHERE D.dt = AA.dt AND D.acct = AA.acct AND D.trading_plan = 'i'
+            )                                                               AS 투자총액,
+            (SELECT SUM(eval_sum) FROM public.dly_stock_balance D
+             WHERE D.dt = AA.dt AND D.acct = AA.acct AND D.trading_plan = 'h'
+            )                                                               AS 홀딩총액
+        FROM public.dly_acct_balance AA
+        WHERE AA.dt BETWEEN %s AND %s
+          AND AA.acct = %s
+    ),
+    ranked AS (
+        SELECT *,
+            ROW_NUMBER() OVER (ORDER BY dt DESC) AS rn
+        FROM base
+    )
+    SELECT
+        dt,
+        tot_evlu_amt,
+        evlu_pfls_amt,
+        현금,
+        COALESCE(손수익, 0)                                                 AS 손수익,
+        COALESCE(매수총액, 0)                                               AS 매수총액,
+        COALESCE(매도총액, 0)                                               AS 매도총액,
+        COALESCE(트레이딩총액, 0)                                           AS 트레이딩총액,
+        COALESCE(투자총액, 0)                                               AS 투자총액,
+        COALESCE(홀딩총액, 0)                                               AS 홀딩총액,
+        ROUND(현금::numeric / NULLIF(tot_evlu_amt, 0) * 100, 2)            AS "현금비율",
+        ROUND(COALESCE(트레이딩총액, 0)::numeric / NULLIF(tot_evlu_amt, 0) * 100, 2) AS "트레이딩비율",
+        ROUND(COALESCE(투자총액, 0)::numeric / NULLIF(tot_evlu_amt, 0) * 100, 2)     AS "투자비율",
+        ROUND(COALESCE(홀딩총액, 0)::numeric / NULLIF(tot_evlu_amt, 0) * 100, 2)     AS "홀딩비율",
+        SUM(COALESCE(손수익, 0)) OVER (
+            ORDER BY rn DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        )                                                                   AS 누적수익합계
+    FROM ranked
+    ORDER BY dt DESC
+"""
 
-if not result1:
-    print("기간별매매손익현황조회 결과가 없습니다.")
+cur05.execute(period_profit_sum, (strt_dt, end_dt, str(acct_no)))
+result_five = cur05.fetchall()
+cur05.close()
+
+data03 = []
+for item in result_five:
+    data03.append({
+        '일자':         item[0],
+        '총평가금액':   float(item[1]) if item[1] is not None else 0.0,
+        '평가손익':     float(item[2]) if item[2] is not None else 0.0,
+        '현금':         float(item[3]) if item[3] is not None else 0.0,
+        '손수익':       float(item[4]) if item[4] is not None else 0.0,
+        '매수총액':     float(item[5]) if item[5] is not None else 0.0,
+        '매도총액':     float(item[6]) if item[6] is not None else 0.0,
+        '트레이딩총액': float(item[7]) if item[7] is not None else 0.0,
+        '투자총액':     float(item[8]) if item[8] is not None else 0.0,
+        '홀딩총액':     float(item[9]) if item[9] is not None else 0.0,
+        '현금비율(%)':  float(item[10]) if item[10] is not None else 0.0,
+        '트레이딩비율(%)': float(item[11]) if item[11] is not None else 0.0,
+        '투자비율(%)':  float(item[12]) if item[12] is not None else 0.0,
+        '홀딩비율(%)':  float(item[13]) if item[13] is not None else 0.0,
+        '누적수익합계': float(item[14]) if item[14] is not None else 0.0,
+    })
+
+df03 = pd.DataFrame(data03)
+
+if df03.empty:
+    st.warning("기간별 수익합계 조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
+    st.title("기간별 수익합계")
 
-    data1 = []
-    for item in result1:
+    df03['일자'] = pd.to_datetime(df03['일자']).dt.strftime('%Y-%m-%d')
 
-        data1.append({
-            '거래일자': item['trad_dt'],
-            '종목명': item['prdt_name'],
-            '매입단가': float(item['pchs_unpr']),
-            '보유수량': float(item['hldg_qty']),
-            '매도단가': float(item['sll_pric']),
-            '매수수량': float(item['buy_qty']),
-            '매도수량': float(item['sll_qty']),
-            '손익률(%)': float(item['pfls_rt']),
-            '손익금액': float(item['rlzt_pfls']),
-            '거래세': float(item['tl_tax']),
-            '수수료': float(item['fee']),
-        })
+    if st.button('기간별 수익합계 상세 데이터'):
 
-    df1 = pd.DataFrame(data1)
+        df_display = df03.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
-    if df1.empty:
-        st.warning("기간별매매손익현황조회된 데이터가 없습니다. 조건을 확인해주세요.")
-    else:
-        # Streamlit 앱 구성
-        st.title("기간별 매매 손익현황 조회")
+        gb = GridOptionsBuilder.from_dataframe(df_display)
+        gb.configure_pagination(enabled=True, paginationPageSize=20)
+        gb.configure_grid_options(domLayout='normal')
+        gb.configure_grid_options(enableRangeSelection=True)
+        gb.configure_grid_options(enableExcelExport=True)
 
-        df1['거래일자'] = pd.to_datetime(df1['거래일자']).dt.strftime('%Y-%m-%d')
+        auto_size_js = JsCode("""
+        function onFirstDataRendered(params) {
+            const allColumnIds = [];
+            params.columnApi.getAllColumns().forEach(function(column) {
+                allColumnIds.push(column.getId());
+            });
+            params.columnApi.autoSizeColumns(allColumnIds, false);
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
 
-        # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-        if st.button('기간별 매매 손익현황 상세 데이터'):
+        column_widths = {
+            '일자':         80,
+            '총평가금액':   110,
+            '평가손익':     100,
+            '현금':         100,
+            '손수익':       100,
+            '매수총액':     100,
+            '매도총액':     100,
+            '트레이딩총액': 110,
+            '투자총액':     100,
+            '홀딩총액':     100,
+            '현금비율(%)':      80,
+            '트레이딩비율(%)':  90,
+            '투자비율(%)':      80,
+            '홀딩비율(%)':      80,
+            '누적수익합계': 110,
+        }
 
-            df_display = df1.sort_values(by='거래일자', ascending=False).copy().reset_index(drop=True)
-
-            # Grid 옵션 생성
-            gb = GridOptionsBuilder.from_dataframe(df_display)
-            # 페이지당 20개 표시
-            gb.configure_pagination(enabled=True, paginationPageSize=20)
-            gb.configure_grid_options(domLayout='normal')
-            # Excel 다운로드를 위한 옵션 추가
-            gb.configure_grid_options(enableRangeSelection=True)
-            gb.configure_grid_options(enableExcelExport=True)
-
-            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-            auto_size_js = JsCode("""
-            function onFirstDataRendered(params) {
-                const allColumnIds = [];
-                params.columnApi.getAllColumns().forEach(function(column) {
-                    allColumnIds.push(column.getId());
-                });
-                params.columnApi.autoSizeColumns(allColumnIds, false);
-            }
-            """)
-            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-            column_widths = {
-                '거래일자': 80,
-                '종목명': 140,
-                '매입단가': 80,
-                '보유수량': 70,
-                '매도단가': 80,
-                '매수수량': 70,
-                '매도수량': 70,
-                '손익률(%)': 70,
-                '손익금액': 100,
-                '거래세': 60,
-                '수수료': 60
-            }
-
-            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-            number_format_js = JsCode("""
-                function(params) {
-                    if (params.value === null || params.value === undefined) {
-                        return '';
-                    }
-                    return params.value.toLocaleString();
+        number_format_js = JsCode("""
+            function(params) {
+                if (params.value === null || params.value === undefined) {
+                    return '';
                 }
-            """)
+                return params.value.toLocaleString();
+            }
+        """)
 
-            percent_format_js = JsCode("""
-                function(params) {
-                    if (params.value === null || params.value === undefined) {
-                        return '';
-                    }
-                    return params.value.toFixed(2) + '%';
+        percent_format_js = JsCode("""
+            function(params) {
+                if (params.value === null || params.value === undefined) {
+                    return '';
                 }
-            """)
+                return params.value.toFixed(2) + '%';
+            }
+        """)
 
-            for col, width in column_widths.items():
-                if col in ['손익률(%)',]:
-                    gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-                elif col in ['매입단가', '보유수량', '매도단가', '매수수량', '매도수량', '손익금액', '거래세', '수수료']:
-                    gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-                else:
-                    gb.configure_column(col, width=width)
+        percent_cols = ['현금비율(%)', '트레이딩비율(%)', '투자비율(%)', '홀딩비율(%)']
+        number_cols  = ['총평가금액', '평가손익', '현금', '손수익', '매수총액', '매도총액',
+                        '트레이딩총액', '투자총액', '홀딩총액', '누적수익합계']
 
-            grid_options = gb.build()
+        for col, width in column_widths.items():
+            if col in percent_cols:
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
+            elif col in number_cols:
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+            else:
+                gb.configure_column(col, width=width)
 
-            # AgGrid를 통해 데이터 출력
-            AgGrid(
-                df_display,
-                gridOptions=grid_options,
-                fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
-                allow_unsafe_jscode=True,
-                use_container_width=True,
-                update_mode=GridUpdateMode.NO_UPDATE,
-                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-            )
+        grid_options = gb.build()
 
-        df1['거래일자'] = pd.to_datetime(df1['거래일자'], errors='coerce')
-        df1 = df1.dropna(subset=['거래일자'])
-        df1 = df1.sort_values(by='거래일자')
-
-        종목리스트 = df1['종목명'].unique()
-        선택종목 = st.selectbox("종목을 선택하세요", 종목리스트)
-
-        선택_df = df1[df1['종목명'] == 선택종목].copy()
-        선택_df = 선택_df.sort_values(by='거래일자')
-        선택_df['누적손익금액'] = 선택_df['손익금액'].cumsum()
-
-        # 누적손익금액 - 왼쪽 Y축 (라인)
-        profit_line = alt.Chart(선택_df).mark_line(color='red', strokeWidth=2).encode(
-            x=alt.X('거래일자:T', title='거래일자', axis=alt.Axis(format='%Y-%m-%d')),
-            y=alt.Y('누적손익금액:Q', title='누적손익금액', axis=alt.Axis(titleColor='red')),
-            tooltip=[
-                alt.Tooltip('거래일자:T', format='%Y-%m-%d'),
-                alt.Tooltip('누적손익금액:Q', format=',')
-            ]
+        AgGrid(
+            df_display,
+            gridOptions=grid_options,
+            fit_columns_on_grid_load=False,
+            allow_unsafe_jscode=True,
+            use_container_width=True,
+            update_mode=GridUpdateMode.NO_UPDATE,
+            enable_enterprise_modules=True,
+            excel_export_mode='xlsx'
         )
 
-        # 보유수량 - 오른쪽 Y축 (바 차트 + 오른쪽 axis)
-        qty_bar = alt.Chart(선택_df).mark_bar(color='gray', opacity=0.5).encode(
-            x=alt.X('거래일자:T', axis=alt.Axis(format='%Y-%m-%d')),
-            y=alt.Y('보유수량:Q', axis=alt.Axis(title='보유수량', titleColor='gray', orient='right')),
-            tooltip=[
-                alt.Tooltip('거래일자:T', format='%Y-%m-%d'),
-                alt.Tooltip('보유수량:Q', format=',')
-            ]
-        )
+    df03['일자'] = pd.to_datetime(df03['일자'])
+    df03 = df03.dropna(subset=['일자'])
+    df03 = df03.sort_values(by='일자')
+    df03['일자_str'] = df03['일자'].dt.strftime('%Y-%m-%d')
+    df03.set_index('일자_str', inplace=True)
 
-        # 결합 차트
-        combined_chart = alt.layer(
-            profit_line,
-            qty_bar
-        ).resolve_scale(
-            y='independent'
-        ).properties(
-            width=800,
-            height=400,
-            title=f"{선택종목} - 누적손익금액(좌) & 보유수량(우)"
-        )
-
-        st.altair_chart(combined_chart, use_container_width=True)
-
-# 기간별손익일별합산조회
-result2 = inquire_period_profit(access_token, app_key, app_secret, code, strt_dt, end_dt)    
-
-if not result2:
-    print("기간별손익일별합산조회 결과가 없습니다.")
-else:
-
-    data2 = []
-    for item in result2:
-
-        data2.append({
-            '거래일자': item['trad_dt'],
-            '매수금액': float(item['buy_amt']),
-            '매도금액': float(item['sll_amt']),
-            '손익률(%)': float(item['pfls_rt']),
-            '손익금액': float(item['rlzt_pfls']),
-            '거래세': float(item['tl_tax']),
-            '수수료': float(item['fee']),
-        })
-
-    df2 = pd.DataFrame(data2)
-
-    if df2.empty:
-        st.warning("기간별손익일별합산조회된 데이터가 없습니다. 조건을 확인해주세요.")
-    else:
-        # Streamlit 앱 구성
-        st.title("기간별 손익 일별합산 조회")
-
-        df2['거래일자'] = pd.to_datetime(df2['거래일자']).dt.strftime('%Y-%m-%d')
-
-        # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-        if st.button('기간별 손익 일별합산 상세 데이터'):
-            
-            df_display = df2.sort_values(by='거래일자', ascending=False).copy().reset_index(drop=True)
-
-            # Grid 옵션 생성
-            gb = GridOptionsBuilder.from_dataframe(df_display)
-            # 페이지당 20개 표시
-            gb.configure_pagination(enabled=True, paginationPageSize=20)
-            gb.configure_grid_options(domLayout='normal')
-            # Excel 다운로드를 위한 옵션 추가
-            gb.configure_grid_options(enableRangeSelection=True)
-            gb.configure_grid_options(enableExcelExport=True)
-
-            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-            auto_size_js = JsCode("""
-            function onFirstDataRendered(params) {
-                const allColumnIds = [];
-                params.columnApi.getAllColumns().forEach(function(column) {
-                    allColumnIds.push(column.getId());
-                });
-                params.columnApi.autoSizeColumns(allColumnIds, false);
-            }
-            """)
-            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-            column_widths = {
-                '거래일자': 80,
-                '매수금액': 100,
-                '매도금액': 100,
-                '손익률(%)': 70,
-                '손익금액': 100,
-                '거래세': 60,
-                '수수료': 60
-            }
-
-            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-            number_format_js = JsCode("""
-                function(params) {
-                    if (params.value === null || params.value === undefined) {
-                        return '';
-                    }
-                    return params.value.toLocaleString();
-                }
-            """)
-
-            percent_format_js = JsCode("""
-                function(params) {
-                    if (params.value === null || params.value === undefined) {
-                        return '';
-                    }
-                    return params.value.toFixed(2) + '%';
-                }
-            """)
-
-            for col, width in column_widths.items():
-                if col in ['손익률(%)',]:
-                    gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-                elif col in ['매수금액', '매도금액', '손익금액', '거래세', '수수료']:
-                    gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-                else:
-                    gb.configure_column(col, width=width)
-            
-            grid_options = gb.build()
-
-            # AgGrid를 통해 데이터 출력
-            AgGrid(
-                df_display,
-                gridOptions=grid_options,
-                fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
-                allow_unsafe_jscode=True,
-                use_container_width=True,
-                update_mode=GridUpdateMode.NO_UPDATE,
-                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-            )
-
-        # 라디오버튼 선택
-        # status = st.radio('정렬을 선택하세요', ['오름차순정렬', '내림차순정렬'])
-
-        # if status == '오름차순정렬':
-        # 	# df의 petal_length 컬럼을 기준으로 오름차순으로 정렬해서 보여주세요
-        # 	st.dataframe(df.sort_values('petal_length',ascending=True))
-        # elif status == '내림차순정렬':
-        # 	st.dataframe(df.sort_values('petal_length',ascending=False))
-
-        df2['거래일자'] = pd.to_datetime(df2['거래일자'])
-        df2 = df2.dropna(subset=['거래일자'])
-        df2 = df2.sort_values(by='거래일자')
-        df2 = df2[df2['손익금액'] != 0]
-
-        # 누적 손익금액 계산
-        df2['누적손익금액'] = df2['손익금액'].cumsum()
-
-        # Altair 바 차트 생성 - 누적손익금액 기준
-        bar_chart = alt.Chart(df2).mark_bar().encode(
-            x=alt.X('거래일자:T', title='거래일자', axis=alt.Axis(format='%Y-%m-%d')),
-            y=alt.Y('누적손익금액:Q', axis=alt.Axis(title='누적 손익금액 (₩)')),
-            color=alt.condition(
-                alt.datum['누적손익금액'] > 0,
-                alt.value('steelblue'),  # 이익
-                alt.value('tomato')      # 손실
-            ),
-            tooltip=[
-                alt.Tooltip('거래일자:T', format='%Y-%m-%d'),
-                alt.Tooltip('누적손익금액:Q', format=',')
-            ]
-        ).properties(
-            width=800,
-            height=400,
-            title='거래일자별 누적 손익금액 바 차트'
-        )
-
-        # Streamlit에 표시
-        st.altair_chart(bar_chart, use_container_width=True)
-
+    st.line_chart(df03[['누적수익합계']])
+    
 # 기간별손익 합산조회
 result3 = inquire_period_trade_profit_sum(access_token, app_key, app_secret, strt_dt, end_dt)        
 
@@ -1417,378 +1306,3 @@ if len(output) > 0:
 else:
     print("전체예약 조회 결과가 없습니다.")
 
-def kw_auth(APP_KEY, APP_SECRET):
-
-    params = {
-		'grant_type': 'client_credentials',  # grant_type
-		'appkey': APP_KEY,  # 앱키
-		'secretkey': APP_SECRET,  # 시크릿키
-	}
-
-    # 인증처리
-    PATH = 'oauth2/token'
-    url = f"{KW_URL_BASE}/{PATH}"
-
-    headers = {
-		'Content-Type': 'application/json;charset=UTF-8', # 컨텐츠타입
-	}
-
-	# 3. http POST 요청
-    response  = requests.post(url, headers=headers, json=params)
-
-    return response.json()["token"]
-
-async def kw_account(nickname):
-
-    cur01 = conn.cursor()
-    cur01.execute("select acct_no, access_token, app_key, app_secret, token_publ_date, substr(token_publ_date, 0, 9) AS token_day from \"stockAccount_stock_account\" where nick_name = '" + nickname + "'")
-    result_two = cur01.fetchone()
-    cur01.close()
-
-    acct_no = result_two[0]
-    access_token = result_two[1]
-    app_key = result_two[2]
-    app_secret = result_two[3]
-    today = datetime.now().strftime("%Y%m%d")
-
-    YmdHMS = datetime.now()
-    validTokenDate = datetime.strptime(result_two[4], '%Y%m%d%H%M%S')
-    diff = YmdHMS - validTokenDate
-    # print("diff : " + str(diff.days))
-    if diff.days >= 1 or result_two[5] != today:  # 토큰 유효기간(1일) 만료 재발급
-        access_token = kw_auth(app_key, app_secret)
-        token_publ_date = datetime.now().strftime("%Y%m%d%H%M%S")
-        print("new access_token2 : " + access_token)
-        # 계정정보 토큰값 변경
-        cur02 = conn.cursor()
-        update_query = "update \"stockAccount_stock_account\" set access_token = %s, token_publ_date = %s, last_chg_date = %s where acct_no = %s"
-        # update 인자값 설정
-        record_to_update = ([access_token, token_publ_date, datetime.now(), acct_no])
-        # DB 연결된 커서의 쿼리 수행
-        cur02.execute(update_query, record_to_update)
-        conn.commit()
-        cur02.close()
-
-    # WebSocketClient 전역 변수 선언
-    websocket_client = WebSocketClient(SOCKET_URL, access_token)
-    await websocket_client.run()   
-
-class WebSocketClient:
-    def __init__(self, uri, access_token):
-        self.uri = uri
-        self.access_token = access_token
-        self.websocket = None
-        self.connected = False
-        self.keep_running = True
-        self.condition_list = []  # 조건검색 목록 저장
-        self.search_results = []  # 조건검색 결과 저장
-
-    # WebSocket 서버에 연결합니다.
-    async def connect(self):
-        try:
-            self.websocket = await websockets.connect(self.uri)
-            self.connected = True
-            print("서버와 연결을 시도 중입니다.")
-
-            # 로그인 패킷
-            param = {
-                'trnm': 'LOGIN',
-                'token': self.access_token
-            }
-
-            print('실시간 시세 서버로 로그인 패킷을 전송합니다.')
-            # 웹소켓 연결 시 로그인 정보 전달
-            await self.send_message(message=param)
-
-        except Exception as e:
-            print(f'Connection error: {e}')
-            self.connected = False
-
-    # 서버에 메시지를 보냅니다. 연결이 없다면 자동으로 연결합니다.
-    async def send_message(self, message):
-        if not self.connected:
-            await self.connect()  # 연결이 끊어졌다면 재연결
-        if self.connected:
-            # message가 문자열이 아니면 JSON으로 직렬화
-            if not isinstance(message, str):
-                message = json.dumps(message)
-
-            await self.websocket.send(message)
-            print(f'Message sent: {message}')
-
-    # 서버에서 오는 메시지를 수신하여 출력합니다.
-    async def receive_messages(self):
-        while self.keep_running:
-            try:
-                message = await self.websocket.recv()
-                if not message:
-                    print('수신된 메시지가 없습니다. 연결이 종료되었을 수 있습니다.')
-                    self.connected = False
-                    await self.websocket.close()
-                    break
-
-                try:
-                    response = json.loads(message)
-                except json.JSONDecodeError:
-                    print(f'JSON 디코딩 오류: {message}')
-                    continue
-
-                trnm = response.get('trnm')
-
-                # 메시지 유형이 LOGIN일 경우 로그인 시도 결과 체크
-                if trnm == 'LOGIN':
-                    if response.get('return_code') != 0:
-                        print('로그인 실패하였습니다. : ', response.get('return_msg'))
-                        await self.disconnect()
-                    else:
-                        print('로그인 성공하였습니다.')
-                        await self.send_message({'trnm': 'CNSRLST'})
-
-                elif trnm == 'CNSRLST':
-                    self.condition_list = response.get('data', [])
-                    # print(f'조건검색 목록 수신: {self.condition_list}')
-                    if self.condition_list:
-                        # 다섯번째 조건검색식: 파워급등주
-                        seq5 = self.condition_list[5][0]
-                        self.power_rapid_name = self.condition_list[5][1]  # 파워급등주 이름 저장
-                        await self.send_message({
-                            'trnm': 'CNSRREQ',
-                            'seq': seq5,
-                            'search_type': '0',
-                            'stex_tp': 'K',
-                            'cont_yn': 'N',
-                            'next_key': '',
-                        })
-                        # 여섯번째 조건검색식: 파워종목
-                        seq6 = self.condition_list[6][0]
-                        self.power_item_name = self.condition_list[6][1]  # 파워종목 이름 저장
-                        await self.send_message({
-                            'trnm': 'CNSRREQ',
-                            'seq': seq6,
-                            'search_type': '0',
-                            'stex_tp': 'K',
-                            'cont_yn': 'N',
-                            'next_key': '',
-                        })
-
-                elif trnm == 'CNSRREQ':
-                    self.search_results = response.get('data', [])
-                    # print(f'조건검색 결과 수신: {self.search_results}')
-                    seq = response.get('seq', '').strip()  # 시퀀스 번호로 구분
-
-                    if seq == self.condition_list[5][0]:  # 파워급등주 결과
-                        # print(f'{self.power_rapid_name}')
-                        # print(f'{self.power_rapid_name}-{self.search_results}')
-                        search_data = []
-                        for i in self.search_results:
-                            code = i['9001'][1:] if i['9001'].startswith('A') else i['9001']
-                            name = i['302']
-                            current_price = math.ceil(float(i['10']))
-                            rate = float(i['12']) / 1000
-                            vol = math.ceil(float(i['13']))
-                            high_price = math.ceil(float(i['17']))
-                            low_price = math.ceil(float(i['18']))
-                            search_data.append({
-                                '종목명': name,
-                                '종목코드': code,
-                                '현재가': current_price,
-                                '거래량': vol,
-                                '고가': high_price,
-                                '저가': low_price,
-                                '등락율': rate,
-                            })
-                            # print(f"{name} [{code}] 현재가: {format(current_price, ',d')}원, 거래량: {format(vol, ',d')}주, 고가: {format(high_price, ',d')}원, 저가: {format(low_price, ',d')}원, 등락율: {rate:.2f}%")
-                            
-                        search_df = pd.DataFrame(search_data)
-
-                        if search_df.empty:
-                            st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
-                        else:
-                            # Streamlit 앱 구성
-                            st.title(self.power_rapid_name)
-
-                            df_display = search_df.copy().reset_index(drop=True)
-
-                            # Grid 옵션 생성
-                            gb = GridOptionsBuilder.from_dataframe(df_display)
-                            # 페이지당 20개 표시
-                            gb.configure_pagination(enabled=True, paginationPageSize=20)
-                            gb.configure_grid_options(domLayout='normal')
-                            # Excel 다운로드를 위한 옵션 추가
-                            gb.configure_grid_options(enableRangeSelection=True)
-                            gb.configure_grid_options(enableExcelExport=True)
-
-                            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-                            auto_size_js = JsCode("""
-                            function onFirstDataRendered(params) {
-                                const allColumnIds = [];
-                                params.columnApi.getAllColumns().forEach(function(column) {
-                                    allColumnIds.push(column.getId());
-                                });
-                                params.columnApi.autoSizeColumns(allColumnIds, false);
-                            }
-                            """)
-                            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-                            column_widths = {
-                                '종목명': 140,
-                                '종목코드': 80,
-                                '현재가': 100,
-                                '거래량': 120,
-                                '고가': 100,
-                                '저가': 100,
-                                '등락율': 80,
-                            }
-
-                            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-                            number_format_js = JsCode("""
-                                function(params) {
-                                    if (params.value === null || params.value === undefined) {
-                                        return '';
-                                    }
-                                    return params.value.toLocaleString();
-                                }
-                            """)
-
-                            # 숫자 포맷을 적용할 컬럼들 설정
-                            for col, width in column_widths.items():
-                                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-
-                            grid_options = gb.build()
-
-                            # AgGrid를 통해 데이터 출력
-                            AgGrid(
-                                df_display,
-                                gridOptions=grid_options,
-                                fit_columns_on_grid_load=False, 
-                                allow_unsafe_jscode=True,
-                                update_mode=GridUpdateMode.NO_UPDATE,
-                                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-                                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-                            )
-
-                    elif seq == self.condition_list[6][0]:  # 파워종목 결과
-                        # print(f'{self.power_item_name}')
-                        # print(f'{self.power_item_name}-{self.search_results}')
-                        search_data = []
-                        for i in self.search_results:
-                            code = i['9001'][1:] if i['9001'].startswith('A') else i['9001']
-                            name = i['302']
-                            current_price = math.ceil(float(i['10']))
-                            rate = float(i['12']) / 1000
-                            vol = math.ceil(float(i['13']))
-                            high_price = math.ceil(float(i['17']))
-                            low_price = math.ceil(float(i['18']))
-                            search_data.append({
-                                '종목명': name,
-                                '종목코드': code,
-                                '현재가': current_price,
-                                '거래량': vol,
-                                '고가': high_price,
-                                '저가': low_price,
-                                '등락율': rate,
-                            })
-                            # print(f"{name} [{code}] 현재가: {format(current_price, ',d')}원, 거래량: {format(vol, ',d')}주, 고가: {format(high_price, ',d')}원, 저가: {format(low_price, ',d')}원, 등락율: {rate:.2f}%")
-
-                        search_df = pd.DataFrame(search_data)
-
-                        if search_df.empty:
-                            st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
-                        else:
-                            # Streamlit 앱 구성
-                            st.title(self.power_item_name)
-
-                            df_display = search_df.copy().reset_index(drop=True)
-
-                            # Grid 옵션 생성
-                            gb = GridOptionsBuilder.from_dataframe(df_display)
-                            # 페이지당 20개 표시
-                            gb.configure_pagination(enabled=True, paginationPageSize=20)
-                            gb.configure_grid_options(domLayout='normal')
-                            # Excel 다운로드를 위한 옵션 추가
-                            gb.configure_grid_options(enableRangeSelection=True)
-                            gb.configure_grid_options(enableExcelExport=True)
-
-                            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-                            auto_size_js = JsCode("""
-                            function onFirstDataRendered(params) {
-                                const allColumnIds = [];
-                                params.columnApi.getAllColumns().forEach(function(column) {
-                                    allColumnIds.push(column.getId());
-                                });
-                                params.columnApi.autoSizeColumns(allColumnIds, false);
-                            }
-                            """)
-                            gb.configure_grid_options(onFirstDataRendered=auto_size_js)                            
-
-                            column_widths = {
-                                '종목명': 140,
-                                '종목코드': 80,
-                                '현재가': 100,
-                                '거래량': 120,
-                                '고가': 100,
-                                '저가': 100,
-                                '등락율': 80,
-                            }
-
-                            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-                            number_format_js = JsCode("""
-                                function(params) {
-                                    if (params.value === null || params.value === undefined) {
-                                        return '';
-                                    }
-                                    return params.value.toLocaleString();
-                                }
-                            """)
-
-                            # 숫자 포맷을 적용할 컬럼들 설정
-                            for col, width in column_widths.items():
-                                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-
-                            grid_options = gb.build()
-
-                            # AgGrid를 통해 데이터 출력
-                            AgGrid(
-                                df_display,
-                                gridOptions=grid_options,
-                                fit_columns_on_grid_load=False, 
-                                allow_unsafe_jscode=True,
-                                update_mode=GridUpdateMode.NO_UPDATE,
-                                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-                                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-                            )
-
-                # 메시지 유형이 PING일 경우 수신값 그대로 송신
-                elif response.get('trnm') == 'PING':
-                    # await self.send_message(response)
-                    await self.websocket.close()
-                    self.keep_running = False
-                    self.connected = False
-                    sys.exit(0)
-
-                else:
-                    print(f'실시간 시세 서버 응답 수신: {response}')
-
-            except websockets.ConnectionClosed:
-                print('서버에 의해 연결이 종료되었습니다.')
-                self.connected = False
-                break
-            except Exception as e:
-                print(f'예외 발생: {e}')
-                self.connected = False
-                break        
-
-    # WebSocket 실행
-    async def run(self):
-        await self.connect()
-        await self.receive_messages()
-
-    # WebSocket 연결 종료
-    async def disconnect(self):
-        self.keep_running = False
-        if self.connected and self.websocket:
-            await self.websocket.close()
-            self.connected = False
-            print('Disconnected from WebSocket server')            
-
-asyncio.run(kw_account('kwphills75'))
