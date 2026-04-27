@@ -240,7 +240,8 @@ else:
         # Streamlit에 출력
         st.plotly_chart(fig)
 
-strt_dt = (st.date_input("시작일", datetime.today() - timedelta(days=30))).strftime("%Y%m%d")
+# strt_dt = (st.date_input("시작일", datetime.today() - timedelta(days=30))).strftime("%Y%m%d")
+strt_dt = (st.date_input("시작일", datetime(2026, 1, 1))).strftime("%Y%m%d")
 end_dt = (st.date_input("종료일", datetime.today())).strftime("%Y%m%d")
 
 cur2 = conn.cursor()
@@ -630,6 +631,8 @@ def account(nickname):
 
 # 계좌잔고 조회
 def stock_balance(access_token, app_key, app_secret, acct_no):
+
+    t = datetime.now().strftime('%H%M')
     
     headers = {"Content-Type": "application/json",
                "authorization": f"Bearer {access_token}",
@@ -639,7 +642,7 @@ def stock_balance(access_token, app_key, app_secret, acct_no):
     params = {
                 "CANO": acct_no,                # 종합계좌번호 계좌번호 체계(8-2)의 앞 8자리
                 'ACNT_PRDT_CD': '01',           # 계좌상품코드 계좌번호 체계(8-2)의 뒤 2자리
-                'AFHR_FLPR_YN': 'N',            # 시간외단일가, 거래소여부 N : 기본값, Y : 시간외단일가, X : NXT 정규장 (프리마켓, 메인, 애프터마켓)
+                'AFHR_FLPR_YN': 'N' if '0900' <= t < '1530' else 'X',            # N : 기본값, Y : 시간외단일가, X : NXT 정규장 (프리마켓, 메인, 애프터마켓) NXT 거래종목만 시세 등 정보가 NXT 기준으로 변동됩니다. KRX 종목들은 그대로 유지
                 'OFL_YN': '',                   # 오프라인여부 공란(Default)
                 'INQR_DVSN': '02',              # 조회구분 01 : 대출일별, 02 : 종목별
                 'UNPR_DVSN': '01',              # 단가구분 01 : 기본값 
@@ -1176,168 +1179,6 @@ else:
     
     st.line_chart(kis_df01[['전체금액']])       
 
-try:
-    cur04 = kis_conn.cursor()
-    trading_trail = """
-        WITH base AS (
-            SELECT
-                trail_day,
-                name,
-                COALESCE(SUM(CASE WHEN trail_tp = '3' THEN
-                    (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-                END), 0)                                                        AS 안전마진_수익합계,
-                COALESCE(SUM(CASE WHEN trail_tp = '4' THEN
-                    (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-                END), 0)                                                        AS 전량매도_수익합계,
-                COALESCE(SUM(
-                    (trail_price - basic_price) * COALESCE(NULLIF(trail_qty, 0), trail_amt / NULLIF(trail_price, 0))
-                ), 0)                                                           AS 전체_수익합계,
-                COALESCE(AVG(trail_rate), 0)                                    AS 전체_평균수익률
-            FROM public.trading_trail
-            WHERE trail_tp IN ('3', '4')
-            AND acct_no = %s
-            AND trail_day BETWEEN %s AND %s
-            GROUP BY name, trail_day
-        ),
-        ranked AS (
-            SELECT *,
-                ROW_NUMBER() OVER (ORDER BY trail_day DESC, name) AS rn
-            FROM base
-        )
-        SELECT
-            trail_day,
-            name,
-            안전마진_수익합계,
-            전량매도_수익합계,
-            전체_수익합계,
-            전체_평균수익률,
-            -- ── 아래행부터 위로 올라가며 누적 (rn 큰값 → 작은값 방향) ──
-            SUM(전체_수익합계) OVER (
-                ORDER BY rn DESC
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            )                                                               AS 누적수익합계
-        FROM ranked
-        ORDER BY trail_day DESC, name
-        """
-
-    cur04.execute(trading_trail, (acct_no, strt_dt, end_dt))
-    result_four = cur04.fetchall()
-    cur04.close()
-
-    data02 = []
-    for item in result_four:
-
-        data02.append({
-            '일자': item[0],
-            '종목': item[1],
-            '안전마진수익': float(item[2]),
-            '전량매도수익': float(item[3]),
-            '전체수익금액': float(item[4]),
-            '전체수익평균(%)': float(item[5]),
-            '누적수익합계': float(item[6]),
-        })
-
-    df02 = pd.DataFrame(data02)
-
-    if df02.empty:
-        st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
-    else:
-        # Streamlit 앱 구성
-        st.title("기간별 추적매매 누적수익합계")
-
-        df02['일자'] = pd.to_datetime(df02['일자']).dt.strftime('%Y-%m-%d')
-
-        # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-        if st.button('기간별 추적매매 누적수익합계 상세 데이터'):
-
-            df_display = df02.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
-
-            # Grid 옵션 생성
-            gb = GridOptionsBuilder.from_dataframe(df_display)
-            # 페이지당 20개 표시
-            gb.configure_pagination(enabled=True, paginationPageSize=20)
-            gb.configure_grid_options(domLayout='normal')
-            # Excel 다운로드를 위한 옵션 추가
-            gb.configure_grid_options(enableRangeSelection=True)
-            gb.configure_grid_options(enableExcelExport=True)
-
-            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-            auto_size_js = JsCode("""
-            function onFirstDataRendered(params) {
-                const allColumnIds = [];
-                params.columnApi.getAllColumns().forEach(function(column) {
-                    allColumnIds.push(column.getId());
-                });
-                params.columnApi.autoSizeColumns(allColumnIds, false);
-            }
-            """)
-            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-            column_widths = {
-                '일자': 80,
-                '종목': 100,
-                '안전마진수익': 100,
-                '전량매도수익': 100,
-                '전체수익금액': 100,
-                '전체수익평균(%)': 70,
-                '누적수익합계': 100,
-            }
-
-            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-            number_format_js = JsCode("""
-                function(params) {
-                    if (params.value === null || params.value === undefined) {
-                        return '';
-                    }
-                    return params.value.toLocaleString();
-                }
-            """)
-
-            percent_format_js = JsCode("""
-                function(params) {
-                    if (params.value === null || params.value === undefined) {
-                        return '';
-                    }
-                    return params.value.toFixed(2) + '%';
-                }
-            """)
-
-            for col, width in column_widths.items():
-                if col in ['전체수익평균(%)',]:
-                    gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-                elif col in ['안전마진수익', '전량매도수익', '전체수익금액', '누적수익합계']:
-                    gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-                else:
-                    gb.configure_column(col, width=width)
-
-            grid_options = gb.build()
-
-            # AgGrid를 통해 데이터 출력
-            AgGrid(
-                df_display,
-                gridOptions=grid_options,
-                fit_columns_on_grid_load=False,   # 화면 로드시 자동 폭 맞춤
-                allow_unsafe_jscode=True,
-                use_container_width=True,
-                update_mode=GridUpdateMode.NO_UPDATE,
-                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-            )
-
-        df02['일자'] = pd.to_datetime(df02['일자'])
-        df02 = df02.dropna(subset=['일자'])
-        df02 = df02.sort_values(by='일자')
-        df02 = df02[df02['전체수익금액'] != 0]
-        # 인덱스를 'YYYY-MM-DD' 문자열로 포맷
-        df02['일자_str'] = df02['일자'].dt.strftime('%Y-%m-%d')
-        df02.set_index('일자_str', inplace=True)
-
-        st.line_chart(df02[['누적수익합계']])
-
-except Exception as e:
-    kis_conn.rollback()
-    print(f"기간별 추적매매 누적수익합계 조회 중 오류 발생 (스킵): {e}")
-
 # 기간별 수익합계
 cur05 = kis_conn.cursor()
 period_profit_sum = """
@@ -1354,6 +1195,22 @@ period_profit_sum = """
                AND A.order_type LIKE '%%매도%%'
                AND A.total_complete_qty::int > 0
             )                                                               AS 손수익,
+            (SELECT SUM((A.order_price::numeric - A.hold_price::numeric) * A.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" A
+             INNER JOIN public.trading_trail B ON A.acct_no = B.acct_no AND A.name = B.name AND A.order_dt = B.trail_day AND B.trail_tp = '3'
+             WHERE A.acct_no = AA.acct::int
+               AND A.order_dt = AA.dt
+               AND A.order_type LIKE '%%매도%%'
+               AND A.total_complete_qty::int > 0
+            )                                                               AS 안전마진,
+            (SELECT SUM((A.order_price::numeric - A.hold_price::numeric) * A.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" A
+             INNER JOIN public.trading_trail B ON A.acct_no = B.acct_no AND A.name = B.name AND A.order_dt = B.trail_day AND B.trail_tp = '4'
+             WHERE A.acct_no = AA.acct::int
+               AND A.order_dt = AA.dt
+               AND A.order_type LIKE '%%매도%%'
+               AND A.total_complete_qty::int > 0
+            )                                                               AS 전량매도,
             (SELECT SUM(B.order_price::numeric * B.total_complete_qty::int)::int
              FROM public."stockOrderComplete_stock_order_complete" B
              WHERE B.acct_no = AA.acct::int
@@ -1381,6 +1238,66 @@ period_profit_sum = """
         FROM public.dly_acct_balance AA
         WHERE AA.dt BETWEEN %s AND %s
           AND AA.acct = %s
+
+        UNION ALL
+        
+        SELECT
+            TO_CHAR(CURRENT_DATE, 'yyyymmdd') 								AS dt,
+            AA.tot_evlu_amt,
+            (SELECT SUM(eval_sum - purchase_sum) FROM public."stockBalance_stock_balance" D
+             WHERE D.proc_yn = 'Y' AND D.acct_no = AA.acct_no
+               AND (D.trading_plan IS NULL OR D.trading_plan NOT IN ('i', 'h'))
+            )                                                               AS evlu_pfls_amt,
+            AA.prvs_rcdl_excc_amt                                           AS 현금,
+            (SELECT SUM((A.order_price::numeric - A.hold_price::numeric) * A.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" A
+             WHERE A.acct_no = AA.acct_no
+               AND A.order_dt = prev_business_day_char(CURRENT_DATE)
+               AND A.order_type LIKE '%%매도%%'
+               AND A.total_complete_qty::int > 0
+            )                                                               AS 손수익,
+            (SELECT SUM((A.order_price::numeric - A.hold_price::numeric) * A.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" A
+             INNER JOIN public.trading_trail B ON A.acct_no = B.acct_no AND A.name = B.name AND A.order_dt = B.trail_day AND B.trail_tp = '3'
+             WHERE A.acct_no = AA.acct_no
+               AND A.order_dt = prev_business_day_char(CURRENT_DATE)
+               AND A.order_type LIKE '%%매도%%'
+               AND A.total_complete_qty::int > 0
+            )                                                               AS 안전마진,
+            (SELECT SUM((A.order_price::numeric - A.hold_price::numeric) * A.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" A
+             INNER JOIN public.trading_trail B ON A.acct_no = B.acct_no AND A.name = B.name AND A.order_dt = B.trail_day AND B.trail_tp = '4'
+             WHERE A.acct_no = AA.acct_no
+               AND A.order_dt = prev_business_day_char(CURRENT_DATE)
+               AND A.order_type LIKE '%%매도%%'
+               AND A.total_complete_qty::int > 0
+            )                                                               AS 전량매도,
+            (SELECT SUM(B.order_price::numeric * B.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" B
+             WHERE B.acct_no = AA.acct_no
+               AND B.order_dt = prev_business_day_char(CURRENT_DATE)
+               AND B.order_type LIKE '%%매수%%'
+               AND B.total_complete_qty::int > 0
+            )                                                               AS 매수총액,
+            (SELECT SUM(C.order_price::numeric * C.total_complete_qty::int)::int
+             FROM public."stockOrderComplete_stock_order_complete" C
+             WHERE C.acct_no = AA.acct_no
+               AND C.order_dt = prev_business_day_char(CURRENT_DATE)
+               AND C.order_type LIKE '%%매도%%'
+               AND C.total_complete_qty::int > 0
+            )                                                               AS 매도총액,
+            (SELECT SUM(eval_sum) FROM public."stockBalance_stock_balance" D
+             WHERE D.proc_yn = 'Y' AND D.acct_no = AA.acct_no
+               AND (D.trading_plan IS NULL OR D.trading_plan NOT IN ('i', 'h'))
+            )                                                               AS 트레이딩총액,
+            (SELECT SUM(eval_sum) FROM public."stockBalance_stock_balance" D
+             WHERE D.proc_yn = 'Y' AND D.acct_no = AA.acct_no AND D.trading_plan = 'i'
+            )                                                               AS 투자총액,
+            (SELECT SUM(eval_sum) FROM public."stockBalance_stock_balance" D
+             WHERE D.proc_yn = 'Y' AND D.acct_no = AA.acct_no AND D.trading_plan = 'h'
+            )                                                               AS 홀딩총액
+        FROM public."stockFundMng_stock_fund_mng" AA
+        WHERE AA.acct_no = %s  
     ),
     ranked AS (
         SELECT *,
@@ -1393,6 +1310,8 @@ period_profit_sum = """
         evlu_pfls_amt,
         현금,
         COALESCE(손수익, 0)                                                 AS 손수익,
+        COALESCE(안전마진, 0)                                               AS 안전마진,
+        COALESCE(전량매도, 0)                                               AS 전량매도,
         COALESCE(매수총액, 0)                                               AS 매수총액,
         COALESCE(매도총액, 0)                                               AS 매도총액,
         COALESCE(트레이딩총액, 0)                                           AS 트레이딩총액,
@@ -1410,7 +1329,7 @@ period_profit_sum = """
     ORDER BY dt DESC
 """
 
-cur05.execute(period_profit_sum, (strt_dt, end_dt, str(acct_no)))
+cur05.execute(period_profit_sum, (strt_dt, end_dt, str(acct_no), str(acct_no)))
 result_five = cur05.fetchall()
 cur05.close()
 
@@ -1422,16 +1341,18 @@ for item in result_five:
         '평가손익':     float(item[2]) if item[2] is not None else 0.0,
         '현금':         float(item[3]) if item[3] is not None else 0.0,
         '손수익':       float(item[4]) if item[4] is not None else 0.0,
-        '매수총액':     float(item[5]) if item[5] is not None else 0.0,
-        '매도총액':     float(item[6]) if item[6] is not None else 0.0,
-        '트레이딩총액': float(item[7]) if item[7] is not None else 0.0,
-        '투자총액':     float(item[8]) if item[8] is not None else 0.0,
-        '홀딩총액':     float(item[9]) if item[9] is not None else 0.0,
-        '현금비율(%)':  float(item[10]) if item[10] is not None else 0.0,
-        '트레이딩비율(%)': float(item[11]) if item[11] is not None else 0.0,
-        '투자비율(%)':  float(item[12]) if item[12] is not None else 0.0,
-        '홀딩비율(%)':  float(item[13]) if item[13] is not None else 0.0,
-        '누적수익합계': float(item[14]) if item[14] is not None else 0.0,
+        '안전마진':     float(item[5]) if item[4] is not None else 0.0,
+        '전량매도':     float(item[6]) if item[4] is not None else 0.0,
+        '매수총액':     float(item[7]) if item[5] is not None else 0.0,
+        '매도총액':     float(item[8]) if item[6] is not None else 0.0,
+        '트레이딩총액': float(item[9]) if item[7] is not None else 0.0,
+        '투자총액':     float(item[10]) if item[8] is not None else 0.0,
+        '홀딩총액':     float(item[11]) if item[9] is not None else 0.0,
+        '현금비율(%)':  float(item[12]) if item[10] is not None else 0.0,
+        '트레이딩비율(%)': float(item[13]) if item[11] is not None else 0.0,
+        '투자비율(%)':  float(item[14]) if item[12] is not None else 0.0,
+        '홀딩비율(%)':  float(item[15]) if item[13] is not None else 0.0,
+        '누적수익합계': float(item[16]) if item[14] is not None else 0.0,
     })
 
 df03 = pd.DataFrame(data03)
@@ -1470,6 +1391,8 @@ else:
             '평가손익':     100,
             '현금':         100,
             '손수익':       100,
+            '안전마진':     100,
+            '전량매도':     100,
             '매수총액':     100,
             '매도총액':     100,
             '트레이딩총액': 110,
@@ -1501,7 +1424,7 @@ else:
         """)
 
         percent_cols = ['현금비율(%)', '트레이딩비율(%)', '투자비율(%)', '홀딩비율(%)']
-        number_cols  = ['총평가금액', '평가손익', '현금', '손수익', '매수총액', '매도총액',
+        number_cols  = ['총평가금액', '평가손익', '현금', '손수익', '안전마진', '전량매도', '매수총액', '매도총액',
                         '트레이딩총액', '투자총액', '홀딩총액', '누적수익합계']
 
         for col, width in column_widths.items():
@@ -1633,6 +1556,7 @@ else:
                 '체결단가': float(item['avg_prvs']),
                 '체결수량': float(item['tot_ccld_qty']),
                 '잔여수량': float(item['rmn_qty']),
+                '거래소': item['excg_id_dvsn_cd'],
             })
 
     df4 = pd.DataFrame(data4)
@@ -1690,6 +1614,7 @@ else:
             '체결단가': 80,
             '체결수량': 70,
             '잔여수량': 70,
+            '거래소': 50,
         }
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
