@@ -15,6 +15,7 @@ import websockets
 import math
 import asyncio
 from dateutil.relativedelta import relativedelta
+import time
 
 URL_BASE = "https://openapi.koreainvestment.com:9443"       # 실전서비스
 KW_URL_BASE = "https://api.kiwoom.com"    
@@ -104,15 +105,17 @@ def stock_balance(access_token, app_key, app_secret, acct_no):
     URL = f"{URL_BASE}/{PATH}"
     
     try:
-        res = requests.get(URL, headers=headers, params=params, verify=False)
-        ar = resp.APIResp(res)
-        
-        body = ar.getBody()
+        ar = None
+        for attempt in range(3):
+            res = requests.get(URL, headers=headers, params=params, verify=False, timeout=10)
+            ar = resp.APIResp(res)
+            if ar.isOK():
+                body = ar.getBody()
+                output1 = body.output1 if hasattr(body, 'output1') else []
+                output2 = body.output2 if hasattr(body, 'output2') else {}
 
-        output1 = body.output1 if hasattr(body, 'output1') else []
-        output2 = body.output2 if hasattr(body, 'output2') else {}
-
-        return output1, output2
+                return output1, output2
+            time.sleep(0.3 * (attempt + 1))
     
     except Exception as e:
         print("계좌잔고조회 중 오류 발생:", e)
