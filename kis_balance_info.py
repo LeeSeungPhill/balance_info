@@ -699,7 +699,7 @@ app_secret = ac['app_secret']
 result0 = stock_balance(access_token, app_key, app_secret, acct_no)
 
 if not result0:
-    print("계좌잔고 조회 결과가 없습니다.")
+    print("계좌현황 결과가 없습니다.")
 else:
     output1, output2 = result0
     data0 = []
@@ -820,7 +820,7 @@ else:
 
         st.plotly_chart(market_fig)
 
-        st.title("잔고정보 조회")
+        st.title("계좌현황")
 
         # 트레이딩/투자 대상 조회 (public."stockBalance_stock_balance")
         cur_trading = conn.cursor()

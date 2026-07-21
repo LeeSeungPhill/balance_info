@@ -81,7 +81,7 @@ result0 = cur1.fetchall()
 cur1.close()
 
 if not result0:
-    print("잔고 조회 결과가 없습니다.")
+    print("계좌현황 결과가 없습니다.")
 else:
     data0 = []
     
@@ -106,7 +106,7 @@ else:
         st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
     else:
         # Streamlit 앱 구성
-        st.title("잔고정보 조회")
+        st.title("계좌현황")
         
         total_amt = df0['평가금액'].sum()
         cash_amt = df0[df0['종목명'] == 'KRW-KRW']['평가금액'].sum()
@@ -290,12 +290,12 @@ if df01.empty:
     st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
     # Streamlit 앱 구성
-    st.title("기간별 잔고현황 조회")
+    st.title("기간별 총평가")
 
     df01['일자'] = pd.to_datetime(df01['일자']).dt.strftime('%Y-%m-%d')
 
     # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-    if st.button('기간별 잔고현황 상세 데이터'):
+    if st.button('기간별 총평가 상세 데이터'):
 
         df_display = df01.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
@@ -1233,7 +1233,7 @@ app_secret = ac['app_secret']
 result0 = stock_balance(access_token, app_key, app_secret, acct_no)
 
 if not result0:
-    print("계좌잔고 조회 결과가 없습니다.")
+    print("계좌현황 결과가 없습니다.")
 else:
     output1, output2 = result0
     data0 = []
@@ -1354,7 +1354,7 @@ else:
 
         st.plotly_chart(market_fig)
 
-        st.title("잔고정보 조회")
+        st.title("계좌현황")
 
         # 트레이딩/투자 대상 조회 (public."stockBalance_stock_balance")
         cur_trading = kis_conn.cursor()
