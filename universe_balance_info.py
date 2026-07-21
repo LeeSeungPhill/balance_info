@@ -1272,8 +1272,6 @@ else:
         st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
     else:
         # Streamlit 앱 구성
-        st.title("KIS 잔고정보 조회")
-        
         total_amt = df0['평가금액'].sum()
         cash_amt = df0[df0['종목명'] == '현금']['평가금액'].sum()
         df_filtered = df0[~df0['종목명'].isin(['현금'])]
@@ -1281,16 +1279,532 @@ else:
         total_eval_amt = df_filtered['평가금액'].sum()
         total_profit_amt = df_filtered['손익금액'].sum()
         profit_rate = (total_profit_amt / total_hold_amt * 100) if total_hold_amt != 0 else 0.0
-        
+
+        # 시장비율 계산 (코스피/코스닥 단기, 중기, 장기 신호 조합)
+        market_state = fetch_market_state(kis_conn, acct_no)
+        market_ratio = compute_market_ratio(
+            market_state['kospi_short'],  market_state['kospi_mid'],  market_state['kospi_long'],
+            market_state['kosdak_short'], market_state['kosdak_mid'], market_state['kosdak_long'],
+        )
+
+        # 시장비율 구성 다이버징 바 차트 (코스피/코스닥 단기, 중기, 장기 신호 조합)
+        # 도넛은 6개 조각 크기가 고정 가중치라 색만으로 상승/하락을 구분해야 했는데,
+        # 막대 방향(좌/우)이 직접 상승/하락을 나타내므로 더 명확하게 인식된다.
+        UP_COLOR = '#e34948'
+        DOWN_COLOR = '#2a78d6'
+        NEUTRAL_COLOR = '#898781'
+
+        market_segments = [
+            ('코스피 단기', market_state['kospi_short'],  '01', '02', 5),
+            ('코스피 중기', market_state['kospi_mid'],    '03', '04', 8),
+            ('코스피 장기', market_state['kospi_long'],   '05', '06', 12),
+            ('코스닥 단기', market_state['kosdak_short'], '01', '02', 5),
+            ('코스닥 중기', market_state['kosdak_mid'],   '03', '04', 8),
+            ('코스닥 장기', market_state['kosdak_long'],  '05', '06', 12),
+        ]
+
+        market_names, market_scores, market_colors, market_texts = [], [], [], []
+        neutral_x, neutral_y = [], []
+
+        for name, signal, bull, bear, weight in market_segments:
+            if signal == bull:
+                status, color, score, text = '상승', UP_COLOR, weight, f'상승 +{weight}점'
+            elif signal == bear:
+                status, color, score, text = '하락', DOWN_COLOR, -weight, f'하락 -{weight}점'
+            else:
+                status, color, score, text = '데이터없음', NEUTRAL_COLOR, 0, '데이터없음'
+                neutral_x.append(0)
+                neutral_y.append(name)
+
+            market_names.append(name)
+            market_scores.append(score)
+            market_colors.append(color)
+            market_texts.append(text)
+
+        market_fig = go.Figure()
+
+        market_fig.add_trace(go.Bar(
+            x=market_scores,
+            y=market_names,
+            orientation='h',
+            marker=dict(color=market_colors),
+            text=market_texts,
+            textposition='outside',
+            cliponaxis=False,
+            hovertemplate='<b>%{y}</b><br>%{text}<extra></extra>'
+        ))
+
+        if neutral_x:
+            market_fig.add_trace(go.Scatter(
+                x=neutral_x, y=neutral_y, mode='markers',
+                marker=dict(symbol='diamond', size=10, color=NEUTRAL_COLOR,
+                            line=dict(width=1, color='#fcfcfb')),
+                showlegend=False,
+                hovertemplate='<b>%{y}</b><br>데이터없음<extra></extra>'
+            ))
+
+        market_fig.update_layout(
+            title=f'시장비율 구성 — 코스피·코스닥 단기/중기/장기 (시장비율 {market_ratio}/100)',
+            xaxis=dict(title='하락(-) / 상승(+) 기여도', range=[-15, 15],
+                       zeroline=True, zerolinewidth=2, zerolinecolor='#0b0b0b'),
+            yaxis=dict(autorange='reversed'),
+            showlegend=False,
+            bargap=0.35,
+        )
+
+        st.plotly_chart(market_fig)
+
+        st.title("잔고정보 조회")
+
+        # 트레이딩/투자 대상 조회 (public."stockBalance_stock_balance")
+        cur_trading = kis_conn.cursor()
+        cur_trading.execute("""
+            SELECT code, name, purchase_price, purchase_amount, purchase_sum, current_price, eval_sum,
+                    COALESCE(avail_amount, purchase_amount, 0) AS avail_qty
+                FROM "stockBalance_stock_balance"
+                WHERE acct_no = %s AND proc_yn = 'Y'
+                AND (trading_plan <> 'i' OR trading_plan IS NULL)
+            UNION ALL
+            SELECT 
+                '' AS code,	'현금' AS name,	0 AS purchase_price, 0 AS purchase_amount, 0 AS purchase_sum, 0 AS current_price, (SELECT prvs_rcdl_excc_amt FROM public."stockFundMng_stock_fund_mng" WHERE acct_no = %s) AS eval_sum,	0 AS avail_qty                
+        """, (str(acct_no),str(acct_no),))
+        trading_rows = cur_trading.fetchall()
+        cur_trading.close()
+
+        cur_invest = kis_conn.cursor()
+        cur_invest.execute("""
+            SELECT name, purchase_price, purchase_amount, purchase_sum, current_price, eval_sum
+                FROM "stockBalance_stock_balance"
+                WHERE acct_no = %s AND proc_yn = 'Y' AND trading_plan = 'i'
+        """, (str(acct_no),))
+        invest_rows = cur_invest.fetchall()
+        cur_invest.close()
+
+        # 추가1) 트레이딩금액 (trading_plan <> 'i' 이거나 NULL, proc_yn = 'Y')
+        trading_holdings = [{
+            'code': code_,
+            'name': name_,
+            'purchase_price': int(float(pur_price_ or 0)),
+            'purchase_amount': float(pur_amt_ or 0),
+            'purchase_sum': float(pur_sum_ or 0),
+            'current_price': int(float(cur_price_ or 0)),
+            'eval_sum': float(eval_sum_ or 0),
+            'avail_qty': int(avail_qty_ or 0),
+        } for code_, name_, pur_price_, pur_amt_, pur_sum_, cur_price_, eval_sum_, avail_qty_ in trading_rows]
+
+        trading_purchase_amt = sum(h['purchase_sum'] for h in trading_holdings)
+        trading_eval_amt = sum(h['eval_sum'] for h in trading_holdings) - cash_amt
+        trading_profit_amt = trading_eval_amt - trading_purchase_amt
+        trading_profit_rate = (trading_profit_amt / trading_purchase_amt * 100) if trading_purchase_amt != 0 else 0.0
+
+        # base(운용 base) = 현금 + 트레이딩평가금액
+        trading_base = cash_amt + trading_eval_amt
+        trading_cash_ratio = (cash_amt / trading_base * 100) if trading_base > 0 else 0.0
+        trading_eval_ratio = (trading_eval_amt / trading_base * 100) if trading_base > 0 else 0.0
+
+        st.subheader("📊 트레이딩")
+        col07, col08, col09 = st.columns(3)
+        col07.metric("매입금액", f"{trading_purchase_amt:,.0f}원")
+        col08.metric("평가금액", f"{trading_eval_amt:,.0f}원")
+        col09.metric("손익금액", f"{trading_profit_amt:,.0f}원", delta=f"{trading_profit_rate:+.2f}%")
+        col10, col11, col12 = st.columns(3)
+        col10.metric("트레이딩 총 금액", f"{trading_base:,.0f}원")
+        col11.metric("현금", f"{cash_amt:,.0f}원")
+        col12.metric("현금(비중)", f"{trading_cash_ratio:.2f}%")
+
+        # 트레이딩 종목별 상세 (총 집계 정보의 종목별 그리드/도넛과 동일한 패턴)
+        data_trading = []
+        for h in trading_holdings:
+            trading_pfls_amt = h['eval_sum'] - h['purchase_sum']
+            trading_pfls_rt = (trading_pfls_amt / h['purchase_sum'] * 100) if h['purchase_sum'] != 0 else 0.0
+            data_trading.append({
+                '코드': h['code'],
+                '종목명': h['name'],
+                '매입단가': h['purchase_price'],
+                '매입수량': h['purchase_amount'],
+                '매입금액': h['purchase_sum'],
+                '현재가': h['current_price'],
+                '평가금액': h['eval_sum'],
+                '손익률(%)': trading_pfls_rt,
+                '손익금액': trading_pfls_amt,
+            })
+
+        df_trading = pd.DataFrame(data_trading)
+
+        if not df_trading.empty:
+            # 평가금액 기준 비중 계산
+            df_trading['비중(%)'] = df_trading['평가금액'] / df_trading['평가금액'].sum() * 100
+
+            # 비중 순으로 정렬
+            df_trading.sort_values(by='비중(%)', ascending=False, inplace=True)
+
+            # 순서 컬럼 추가 (1부터 시작)
+            df_trading.insert(0, '순서', range(1, len(df_trading) + 1))
+
+            df_display = df_trading.copy().reset_index(drop=True)
+
+            # Grid 옵션 생성
+            gb = GridOptionsBuilder.from_dataframe(df_display)
+            # 코드 컬럼 숨기기
+            gb.configure_column('코드', hide=True)
+            # 페이지당 20개 표시
+            gb.configure_pagination(enabled=True, paginationPageSize=20)
+            gb.configure_grid_options(domLayout='normal')
+            # Excel 다운로드를 위한 옵션 추가
+            gb.configure_grid_options(enableRangeSelection=True)
+            gb.configure_grid_options(enableExcelExport=True)
+
+            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+            auto_size_js = JsCode("""
+            function onFirstDataRendered(params) {
+                const allColumnIds = [];
+                params.columnApi.getAllColumns().forEach(function(column) {
+                    allColumnIds.push(column.getId());
+                });
+                params.columnApi.autoSizeColumns(allColumnIds, false);
+            }
+            """)
+            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+
+            column_widths = {
+                '순서': 40,
+                '종목명': 140,
+                '매입단가': 80,
+                '매입수량': 70,
+                '매입금액': 100,
+                '현재가': 80,
+                '평가금액': 100,
+                '손익률(%)': 70,
+                '손익금액': 100,
+                '비중(%)': 70
+            }
+
+            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+            number_format_js = JsCode("""
+                function(params) {
+                    if (params.value === null || params.value === undefined) {
+                        return '';
+                    }
+                    return params.value.toLocaleString();
+                }
+            """)
+
+            percent_format_js = JsCode("""
+                function(params) {
+                    if (params.value === null || params.value === undefined) {
+                        return '';
+                    }
+                    return params.value.toFixed(2) + '%';
+                }
+            """)
+
+            for col, width in column_widths.items():
+                if col in ['손익률(%)', '비중(%)']:
+                    gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
+                elif col in ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익금액']:
+                    gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+                else:
+                    gb.configure_column(col, width=width)
+
+            grid_options = gb.build()
+
+            # AgGrid를 통해 데이터 출력
+            AgGrid(
+                df_display,
+                gridOptions=grid_options,
+                fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
+                allow_unsafe_jscode=True,
+                use_container_width=True,
+                update_mode=GridUpdateMode.NO_UPDATE,
+                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+            )
+
+            df_pie = df_trading[df_trading['평가금액'] > 0].copy()
+
+            # 레이블 생성: 비중 종목명 (매입가, 손익률) [매도대상 시 수량 표기]
+            def format_trading_label(row):
+                if row['종목명'] == '현금':
+                    return f"{row['비중(%)']:.1f}% {row['종목명']}"
+                else:
+                    profit_rate = f"{row['손익률(%)']:+.2f}%"
+                    return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate}, {row['매입수량']:,.0f}주)"
+
+            df_pie['라벨'] = df_pie.apply(format_trading_label, axis=1)
+            df_pie['custom_평가금액'] = df_pie['평가금액'].apply(lambda x: f"{x:,.0f}원")
+
+            df_pie.sort_values(by='비중(%)', ascending=False, inplace=True)
+
+            # 도넛 차트 생성 (매도대상 종목은 다른 색으로 표시)
+            trading_fig = go.Figure(
+                data=[go.Pie(
+                    labels=df_pie['라벨'],
+                    values=df_pie['평가금액'],
+                    hole=0.4,
+                    customdata=df_pie['custom_평가금액'],
+                    hovertemplate='<b>%{label}</b><br><span style="color:red">평가금액: %{customdata[0]}</span><extra></extra>'
+                )]
+            )
+
+            trading_fig.update_layout(title='트레이딩 평가금액 비율')
+
+            # Streamlit에 출력
+            st.plotly_chart(trading_fig)
+
+        # 트레이딩매입금액 비율이 시장비율을 초과하면 매도 대상/수량 산정
+        # (simul/kis_market_ratio_rebalance.py의 build_rebalance_orders, allocate 참조)
+        SELL_COLOR = '#d03b3b'
+        HOLD_COLOR = '#2a78d6'
+        sell_qty_map = {}
+
+        if trading_eval_ratio > market_ratio and trading_holdings:
+            try:
+                strength_fn = _make_strength_fn(
+                    {'access_token': access_token, 'app_key': app_key, 'app_secret': app_secret}, {}
+                )
+                quality_fn = lambda code_: 50.0  # 참고용 항목으로 매도 우선순위 산정에서는 제외
+
+                rebal_holdings = [dict(h) for h in trading_holdings if h['eval_sum'] > 0 and h['code'] != '']
+                orders, excess = build_rebalance_orders(
+                    rebal_holdings, cash_amt, market_ratio, strength_fn, quality_fn
+                )
+                sell_qty_map = {h['code']: qty for h, qty in orders if qty > 0}
+
+                if sell_qty_map:
+                    st.caption(
+                        f"⚠️ 트레이딩 평가금액 비율({trading_eval_ratio:.1f}%)이 시장비율({market_ratio}%)을 "
+                        f"초과 {len(sell_qty_map)}개 종목 매도 대상(초과금액 {excess:,.0f}원)"
+                    )
+            except Exception as e:
+                st.warning(f"매도 대상 산정 중 오류가 발생했습니다: {e}")
+
+        sell_target_holdings = [h for h in trading_holdings if h['code'] != '']
+
+        if sell_target_holdings:
+            # 클릭 매도용 차트 - Plotly Pie(도넛)는 st.plotly_chart(on_select=...) 클릭 선택이
+            # 동작하지 않아(Plotly/Streamlit 자체 제약, 실측 확인) 가로 막대 차트로 표시한다.
+            trading_labels, trading_values, trading_colors, trading_texts = [], [], [], []
+            for h in sell_target_holdings:
+                if h['code'] in sell_qty_map:
+                    trading_labels.append(f"{h['name']} (매도대상 {sell_qty_map[h['code']]:,}주)")
+                    trading_colors.append(SELL_COLOR)
+                else:
+                    trading_labels.append(h['name'])
+                    trading_colors.append(HOLD_COLOR)
+                trading_values.append(h['eval_sum'])
+                trading_texts.append(f"{h['eval_sum']:,.0f}원")
+
+            trading_fig = go.Figure(
+                data=[go.Bar(
+                    x=trading_values,
+                    y=trading_labels,
+                    orientation='h',
+                    marker=dict(color=trading_colors),
+                    text=trading_texts,
+                    textposition='outside',
+                    cliponaxis=False,
+                    hovertemplate='<b>%{y}</b><br>평가금액: %{x:,.0f}원<extra></extra>'
+                )]
+            )
+            trading_fig.update_layout(
+                title='시장비율 초과 매도종목 (막대를 클릭하여 매도)',
+                xaxis=dict(title='평가금액(원)'),
+                yaxis=dict(autorange='reversed'),
+                showlegend=False,
+            )
+
+            sell_click_event = st.plotly_chart(
+                trading_fig, on_select="rerun", selection_mode="points", key="sell_target_chart"
+            )
+
+            clicked_points = sell_click_event.selection.points if sell_click_event and sell_click_event.selection else []
+
+            if clicked_points:
+                clicked_h = sell_target_holdings[clicked_points[0]['point_index']]
+
+                if clicked_h['code'] not in sell_qty_map:
+                    st.info(f"{clicked_h['name']}은(는) 매도 대상이 아닙니다. (매도 대상 종목만 클릭해서 매도할 수 있습니다)")
+                else:
+                    sell_qty = sell_qty_map[clicked_h['code']]
+                    est_amt = sell_qty * clicked_h['current_price']
+
+                    if st.session_state.get('sell_click_executed') == clicked_h['code']:
+                        st.info(f"{clicked_h['name']}[{clicked_h['code']}]은(는) 이미 매도 주문이 접수되었습니다. 다른 종목을 선택해주세요.")
+                    else:
+                        st.warning(
+                            f"선택: **{clicked_h['name']}[{clicked_h['code']}]** {sell_qty:,}주 시장가 매도 "
+                            f"(현재가 {clicked_h['current_price']:,}원, 예상 매도금액 {est_amt:,}원)"
+                        )
+                        # (simul/kis_market_ratio_rebalance.py의 order_cash/record_sell 호출 부분 참조)
+                        if st.button(f"⚠️ {clicked_h['name']} {sell_qty:,}주 매도 실행", key=f"sell_confirm_{clicked_h['code']}"):
+                            tag = f"{clicked_h['name']}[{clicked_h['code']}] {sell_qty}주"
+                            ar = order_cash(False, access_token, app_key, app_secret,
+                                            str(acct_no), clicked_h["code"], "01", sell_qty, 0, excg_id="KRX")
+                            if ar.isOK():
+                                out = ar.getBody().output
+                                order_no = (out or {}).get("ODNO", "")
+                                st.success(f"✅ 매도접수 {tag} 주문번호={str(int(order_no))}")
+                                record_sell(kis_conn, acct_no, clicked_h, sell_qty, clicked_h["current_price"], order_no, "Bar")
+                                st.session_state['sell_click_executed'] = clicked_h['code']
+                            else:
+                                st.error(f"❌ 매도실패 {tag}: {ar.getErrorCode()} {ar.getErrorMessage()}")
+
+        # 추가2) 투자매입금액 (trading_plan = 'i', proc_yn = 'Y')
+        data_invest = []
+        for name_, pur_price_, pur_amt_, pur_sum_, cur_price_, eval_sum_ in invest_rows:
+            invest_pur_sum = float(pur_sum_ or 0)
+            invest_eval_sum = float(eval_sum_ or 0)
+            invest_pfls_amt = invest_eval_sum - invest_pur_sum
+            invest_pfls_rt = (invest_pfls_amt / invest_pur_sum * 100) if invest_pur_sum != 0 else 0.0
+            data_invest.append({
+                '종목명': name_,
+                '매입단가': int(float(pur_price_ or 0)),
+                '매입수량': float(pur_amt_ or 0),
+                '매입금액': invest_pur_sum,
+                '현재가': int(float(cur_price_ or 0)),
+                '평가금액': invest_eval_sum,
+                '손익률(%)': invest_pfls_rt,
+                '손익금액': invest_pfls_amt,
+            })
+
+        df_invest = pd.DataFrame(data_invest)
+
+        invest_purchase_amt = df_invest['매입금액'].sum() if not df_invest.empty else 0.0
+        invest_eval_amt = df_invest['평가금액'].sum() if not df_invest.empty else 0.0
+        invest_profit_amt = invest_eval_amt - invest_purchase_amt
+        invest_profit_rate = (invest_profit_amt / invest_purchase_amt * 100) if invest_purchase_amt != 0 else 0.0
+
+        st.subheader("📊 투자")
+        col13, col14, col15 = st.columns(3)
+        col13.metric("매입금액", f"{invest_purchase_amt:,.0f}원")
+        col14.metric("평가금액", f"{invest_eval_amt:,.0f}원")
+        col15.metric("손익금액", f"{invest_profit_amt:,.0f}원", delta=f"{invest_profit_rate:+.2f}%")
+
+        if not df_invest.empty:
+            # 평가금액 기준 비중 계산
+            df_invest['비중(%)'] = df_invest['평가금액'] / df_invest['평가금액'].sum() * 100
+
+            # 비중 순으로 정렬
+            df_invest.sort_values(by='비중(%)', ascending=False, inplace=True)
+
+            # 순서 컬럼 추가 (1부터 시작)
+            df_invest.insert(0, '순서', range(1, len(df_invest) + 1))
+
+            df_display = df_invest.copy().reset_index(drop=True)
+
+            # Grid 옵션 생성
+            gb = GridOptionsBuilder.from_dataframe(df_display)
+            # 페이지당 20개 표시
+            gb.configure_pagination(enabled=True, paginationPageSize=20)
+            gb.configure_grid_options(domLayout='normal')
+            # Excel 다운로드를 위한 옵션 추가
+            gb.configure_grid_options(enableRangeSelection=True)
+            gb.configure_grid_options(enableExcelExport=True)
+
+            # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+            auto_size_js = JsCode("""
+            function onFirstDataRendered(params) {
+                const allColumnIds = [];
+                params.columnApi.getAllColumns().forEach(function(column) {
+                    allColumnIds.push(column.getId());
+                });
+                params.columnApi.autoSizeColumns(allColumnIds, false);
+            }
+            """)
+            gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+
+            column_widths = {
+                '순서': 40,
+                '종목명': 140,
+                '매입단가': 80,
+                '매입수량': 70,
+                '매입금액': 100,
+                '현재가': 80,
+                '평가금액': 100,
+                '손익률(%)': 70,
+                '손익금액': 100,
+                '비중(%)': 70
+            }
+
+            # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+            number_format_js = JsCode("""
+                function(params) {
+                    if (params.value === null || params.value === undefined) {
+                        return '';
+                    }
+                    return params.value.toLocaleString();
+                }
+            """)
+
+            percent_format_js = JsCode("""
+                function(params) {
+                    if (params.value === null || params.value === undefined) {
+                        return '';
+                    }
+                    return params.value.toFixed(2) + '%';
+                }
+            """)
+
+            for col, width in column_widths.items():
+                if col in ['손익률(%)', '비중(%)']:
+                    gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
+                elif col in ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익금액']:
+                    gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+                else:
+                    gb.configure_column(col, width=width)
+
+            grid_options = gb.build()
+
+            # AgGrid를 통해 데이터 출력
+            AgGrid(
+                df_display,
+                gridOptions=grid_options,
+                fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
+                allow_unsafe_jscode=True,
+                use_container_width=True,
+                update_mode=GridUpdateMode.NO_UPDATE,
+                enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+            )
+
+            df_pie = df_invest[df_invest['평가금액'] > 0].copy()
+
+            # 레이블 생성: 비중 종목명 (매입가, 손익률)
+            def format_invest_label(row):
+                profit_rate = f"{row['손익률(%)']:+.2f}%"
+                return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate}, {row['매입수량']:,.0f}주)"
+
+            df_pie['라벨'] = df_pie.apply(format_invest_label, axis=1)
+            df_pie['custom_평가금액'] = df_pie['평가금액'].apply(lambda x: f"{x:,.0f}원")
+
+            df_pie.sort_values(by='비중(%)', ascending=False, inplace=True)
+
+            # 도넛 차트 생성
+            invest_fig = go.Figure(
+                data=[go.Pie(
+                    labels=df_pie['라벨'],
+                    values=df_pie['평가금액'],
+                    hole=0.4,
+                    customdata=df_pie['custom_평가금액'],
+                    hovertemplate='<b>%{label}</b><br><span style="color:red">평가금액: %{customdata[0]}</span><extra></extra>'
+                )]
+            )
+
+            invest_fig.update_layout(title='투자 평가금액 비율')
+
+            # Streamlit에 출력
+            st.plotly_chart(invest_fig)
+
         st.subheader("📊 총 집계 정보")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         col1.metric("총 금액", f"{total_amt:,.0f}원")
         col2.metric("현금", f"{cash_amt:,.0f}원")
-        col3, col4, col5 = st.columns(3)
-        col3.metric("총 매입금액", f"{total_hold_amt:,.0f}원")
-        col4.metric("총 평가금액", f"{total_eval_amt:,.0f}원")
-        col5.metric("총 손익금액", f"{total_profit_amt:,.0f}원", delta=f"{profit_rate:+.2f}%")
-
+        col3.metric("시장비율", f"{market_ratio}/100", delta=f"{market_ratio - 50:+d}")
+        col4, col5, col6 = st.columns(3)
+        col4.metric("총 매입금액", f"{total_hold_amt:,.0f}원")
+        col5.metric("총 평가금액", f"{total_eval_amt:,.0f}원")
+        col6.metric("총 손익금액", f"{total_profit_amt:,.0f}원", delta=f"{profit_rate:+.2f}%")
+        
         # 전체 평가금액 기준 비중 계산
         df0['비중(%)'] = df0['평가금액'] / df0['평가금액'].sum() * 100
 
@@ -1382,10 +1896,10 @@ else:
         # 레이블 생성: 종목명 (매입단가) or 종목명 (평가금액)
         def format_label(row):
             if row['종목명'] == '현금':
-                return f"{row['비중(%)']:.1f}% {row['종목명']} ({row['평가금액']:,.0f}원)"
+                return f"{row['비중(%)']:.1f}% {row['종목명']}"
             else:
                 profit_rate = f"{row['손익률(%)']:+.2f}%"
-                return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate})"
+                return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate}, {row['매입수량']:,.0f}주)"
 
         df_pie['종목명'] = df_pie.apply(format_label, axis=1)
         df_pie['custom_평가금액'] = df_pie['평가금액'].apply(lambda x: f"{x:,.0f}원")
@@ -1406,693 +1920,7 @@ else:
         fig.update_layout(title='종목별 평가금액 비율')
 
         # Streamlit에 출력
-        st.plotly_chart(fig)        
-
-code = ""
-# selected_date = st.slider(
-#     "날짜 범위 선택",
-#     min_value=datetime.today() - timedelta(days=365),
-#     max_value=datetime.today(),
-#     value=(datetime.today() - timedelta(days=30), datetime.today()),
-#     step=timedelta(days=1),
-# )
-
-cur03 = kis_conn.cursor()
-cur03.execute("select prvs_excc_amt, pchs_amt, evlu_amt, evlu_pfls_amt, dt from \"dly_acct_balance\" where acct = '" + str(acct_no) + "' and dt between '" + strt_dt + "' and '" + end_dt + "'")
-result_three = cur03.fetchall()
-cur03.close() 
-
-kis_data01 = []
-for item in result_three:
-
-    전체금액 = float(item[0]) + float(item[2])  # 예수금 + 평가금액
-    예수금 = float(item[0])
-
-    kis_data01.append({
-        '일자': item[4],
-        '전체금액': 전체금액,
-        '총구매금액': float(item[1]),
-        '평가금액': float(item[2]),
-        '수익금액': float(item[3]),
-        '예수금': 예수금,
-        '예수금비율(%)': (예수금 / 전체금액 * 100) if 전체금액 > 0 else 0,
-    })
-
-kis_df01 = pd.DataFrame(kis_data01)
-
-if kis_df01.empty:
-    st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
-else:
-    # Streamlit 앱 구성
-    total_amt = df0['평가금액'].sum()
-    cash_amt = df0[df0['종목명'] == '현금']['평가금액'].sum()
-    df_filtered = df0[~df0['종목명'].isin(['현금'])]
-    total_hold_amt = df_filtered['매입금액'].sum()
-    total_eval_amt = df_filtered['평가금액'].sum()
-    total_profit_amt = df_filtered['손익금액'].sum()
-    profit_rate = (total_profit_amt / total_hold_amt * 100) if total_hold_amt != 0 else 0.0
-
-    # 시장비율 계산 (코스피/코스닥 단기, 중기, 장기 신호 조합)
-    market_state = fetch_market_state(kis_conn, acct_no)
-    market_ratio = compute_market_ratio(
-        market_state['kospi_short'],  market_state['kospi_mid'],  market_state['kospi_long'],
-        market_state['kosdak_short'], market_state['kosdak_mid'], market_state['kosdak_long'],
-    )
-
-    # 시장비율 구성 다이버징 바 차트 (코스피/코스닥 단기, 중기, 장기 신호 조합)
-    # 도넛은 6개 조각 크기가 고정 가중치라 색만으로 상승/하락을 구분해야 했는데,
-    # 막대 방향(좌/우)이 직접 상승/하락을 나타내므로 더 명확하게 인식된다.
-    UP_COLOR = '#e34948'
-    DOWN_COLOR = '#2a78d6'
-    NEUTRAL_COLOR = '#898781'
-
-    market_segments = [
-        ('코스피 단기', market_state['kospi_short'],  '01', '02', 5),
-        ('코스피 중기', market_state['kospi_mid'],    '03', '04', 8),
-        ('코스피 장기', market_state['kospi_long'],   '05', '06', 12),
-        ('코스닥 단기', market_state['kosdak_short'], '01', '02', 5),
-        ('코스닥 중기', market_state['kosdak_mid'],   '03', '04', 8),
-        ('코스닥 장기', market_state['kosdak_long'],  '05', '06', 12),
-    ]
-
-    market_names, market_scores, market_colors, market_texts = [], [], [], []
-    neutral_x, neutral_y = [], []
-
-    for name, signal, bull, bear, weight in market_segments:
-        if signal == bull:
-            status, color, score, text = '상승', UP_COLOR, weight, f'상승 +{weight}점'
-        elif signal == bear:
-            status, color, score, text = '하락', DOWN_COLOR, -weight, f'하락 -{weight}점'
-        else:
-            status, color, score, text = '데이터없음', NEUTRAL_COLOR, 0, '데이터없음'
-            neutral_x.append(0)
-            neutral_y.append(name)
-
-        market_names.append(name)
-        market_scores.append(score)
-        market_colors.append(color)
-        market_texts.append(text)
-
-    market_fig = go.Figure()
-
-    market_fig.add_trace(go.Bar(
-        x=market_scores,
-        y=market_names,
-        orientation='h',
-        marker=dict(color=market_colors),
-        text=market_texts,
-        textposition='outside',
-        cliponaxis=False,
-        hovertemplate='<b>%{y}</b><br>%{text}<extra></extra>'
-    ))
-
-    if neutral_x:
-        market_fig.add_trace(go.Scatter(
-            x=neutral_x, y=neutral_y, mode='markers',
-            marker=dict(symbol='diamond', size=10, color=NEUTRAL_COLOR,
-                        line=dict(width=1, color='#fcfcfb')),
-            showlegend=False,
-            hovertemplate='<b>%{y}</b><br>데이터없음<extra></extra>'
-        ))
-
-    market_fig.update_layout(
-        title=f'시장비율 구성 — 코스피·코스닥 단기/중기/장기 (시장비율 {market_ratio}/100)',
-        xaxis=dict(title='하락(-) / 상승(+) 기여도', range=[-15, 15],
-                    zeroline=True, zerolinewidth=2, zerolinecolor='#0b0b0b'),
-        yaxis=dict(autorange='reversed'),
-        showlegend=False,
-        bargap=0.35,
-    )
-
-    st.plotly_chart(market_fig)
-
-    st.title("잔고정보 조회")
-
-    # 트레이딩/투자 대상 조회 (public."stockBalance_stock_balance")
-    cur_trading = kis_conn.cursor()
-    cur_trading.execute("""
-        SELECT code, name, purchase_price, purchase_amount, purchase_sum, current_price, eval_sum,
-                COALESCE(avail_amount, purchase_amount, 0) AS avail_qty
-            FROM "stockBalance_stock_balance"
-            WHERE acct_no = %s AND proc_yn = 'Y'
-            AND (trading_plan <> 'i' OR trading_plan IS NULL)
-        UNION ALL
-        SELECT 
-            '' AS code,	'현금' AS name,	0 AS purchase_price, 0 AS purchase_amount, 0 AS purchase_sum, 0 AS current_price, (SELECT prvs_rcdl_excc_amt FROM public."stockFundMng_stock_fund_mng" WHERE acct_no = %s) AS eval_sum,	0 AS avail_qty                
-    """, (str(acct_no),str(acct_no),))
-    trading_rows = cur_trading.fetchall()
-    cur_trading.close()
-
-    cur_invest = kis_conn.cursor()
-    cur_invest.execute("""
-        SELECT name, purchase_price, purchase_amount, purchase_sum, current_price, eval_sum
-            FROM "stockBalance_stock_balance"
-            WHERE acct_no = %s AND proc_yn = 'Y' AND trading_plan = 'i'
-    """, (str(acct_no),))
-    invest_rows = cur_invest.fetchall()
-    cur_invest.close()
-
-    # 추가1) 트레이딩금액 (trading_plan <> 'i' 이거나 NULL, proc_yn = 'Y')
-    trading_holdings = [{
-        'code': code_,
-        'name': name_,
-        'purchase_price': int(float(pur_price_ or 0)),
-        'purchase_amount': float(pur_amt_ or 0),
-        'purchase_sum': float(pur_sum_ or 0),
-        'current_price': int(float(cur_price_ or 0)),
-        'eval_sum': float(eval_sum_ or 0),
-        'avail_qty': int(avail_qty_ or 0),
-    } for code_, name_, pur_price_, pur_amt_, pur_sum_, cur_price_, eval_sum_, avail_qty_ in trading_rows]
-
-    trading_purchase_amt = sum(h['purchase_sum'] for h in trading_holdings)
-    trading_eval_amt = sum(h['eval_sum'] for h in trading_holdings) - cash_amt
-    trading_profit_amt = trading_eval_amt - trading_purchase_amt
-    trading_profit_rate = (trading_profit_amt / trading_purchase_amt * 100) if trading_purchase_amt != 0 else 0.0
-
-    # base(운용 base) = 현금 + 트레이딩평가금액
-    trading_base = cash_amt + trading_eval_amt
-    trading_cash_ratio = (cash_amt / trading_base * 100) if trading_base > 0 else 0.0
-    trading_eval_ratio = (trading_eval_amt / trading_base * 100) if trading_base > 0 else 0.0
-
-    st.subheader("📊 트레이딩")
-    col07, col08, col09 = st.columns(3)
-    col07.metric("매입금액", f"{trading_purchase_amt:,.0f}원")
-    col08.metric("평가금액", f"{trading_eval_amt:,.0f}원")
-    col09.metric("손익금액", f"{trading_profit_amt:,.0f}원", delta=f"{trading_profit_rate:+.2f}%")
-    col10, col11, col12 = st.columns(3)
-    col10.metric("트레이딩 총 금액", f"{trading_base:,.0f}원")
-    col11.metric("현금", f"{cash_amt:,.0f}원")
-    col12.metric("현금(비중)", f"{trading_cash_ratio:.2f}%")
-
-    # 트레이딩 종목별 상세 (총 집계 정보의 종목별 그리드/도넛과 동일한 패턴)
-    data_trading = []
-    for h in trading_holdings:
-        trading_pfls_amt = h['eval_sum'] - h['purchase_sum']
-        trading_pfls_rt = (trading_pfls_amt / h['purchase_sum'] * 100) if h['purchase_sum'] != 0 else 0.0
-        data_trading.append({
-            '코드': h['code'],
-            '종목명': h['name'],
-            '매입단가': h['purchase_price'],
-            '매입수량': h['purchase_amount'],
-            '매입금액': h['purchase_sum'],
-            '현재가': h['current_price'],
-            '평가금액': h['eval_sum'],
-            '손익률(%)': trading_pfls_rt,
-            '손익금액': trading_pfls_amt,
-        })
-
-    df_trading = pd.DataFrame(data_trading)
-
-    if not df_trading.empty:
-        # 평가금액 기준 비중 계산
-        df_trading['비중(%)'] = df_trading['평가금액'] / df_trading['평가금액'].sum() * 100
-
-        # 비중 순으로 정렬
-        df_trading.sort_values(by='비중(%)', ascending=False, inplace=True)
-
-        # 순서 컬럼 추가 (1부터 시작)
-        df_trading.insert(0, '순서', range(1, len(df_trading) + 1))
-
-        df_display = df_trading.copy().reset_index(drop=True)
-
-        # Grid 옵션 생성
-        gb = GridOptionsBuilder.from_dataframe(df_display)
-        # 코드 컬럼 숨기기
-        gb.configure_column('코드', hide=True)
-        # 페이지당 20개 표시
-        gb.configure_pagination(enabled=True, paginationPageSize=20)
-        gb.configure_grid_options(domLayout='normal')
-        # Excel 다운로드를 위한 옵션 추가
-        gb.configure_grid_options(enableRangeSelection=True)
-        gb.configure_grid_options(enableExcelExport=True)
-
-        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-        auto_size_js = JsCode("""
-        function onFirstDataRendered(params) {
-            const allColumnIds = [];
-            params.columnApi.getAllColumns().forEach(function(column) {
-                allColumnIds.push(column.getId());
-            });
-            params.columnApi.autoSizeColumns(allColumnIds, false);
-        }
-        """)
-        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-        column_widths = {
-            '순서': 40,
-            '종목명': 140,
-            '매입단가': 80,
-            '매입수량': 70,
-            '매입금액': 100,
-            '현재가': 80,
-            '평가금액': 100,
-            '손익률(%)': 70,
-            '손익금액': 100,
-            '비중(%)': 70
-        }
-
-        # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-        number_format_js = JsCode("""
-            function(params) {
-                if (params.value === null || params.value === undefined) {
-                    return '';
-                }
-                return params.value.toLocaleString();
-            }
-        """)
-
-        percent_format_js = JsCode("""
-            function(params) {
-                if (params.value === null || params.value === undefined) {
-                    return '';
-                }
-                return params.value.toFixed(2) + '%';
-            }
-        """)
-
-        for col, width in column_widths.items():
-            if col in ['손익률(%)', '비중(%)']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-            elif col in ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익금액']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-            else:
-                gb.configure_column(col, width=width)
-
-        grid_options = gb.build()
-
-        # AgGrid를 통해 데이터 출력
-        AgGrid(
-            df_display,
-            gridOptions=grid_options,
-            fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
-            allow_unsafe_jscode=True,
-            use_container_width=True,
-            update_mode=GridUpdateMode.NO_UPDATE,
-            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-        )
-
-        df_pie = df_trading[df_trading['평가금액'] > 0].copy()
-
-        # 레이블 생성: 비중 종목명 (매입가, 손익률) [매도대상 시 수량 표기]
-        def format_trading_label(row):
-            if row['종목명'] == '현금':
-                return f"{row['비중(%)']:.1f}% {row['종목명']}"
-            else:
-                profit_rate = f"{row['손익률(%)']:+.2f}%"
-                return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate}, {row['매입수량']:,.0f}주)"
-
-        df_pie['라벨'] = df_pie.apply(format_trading_label, axis=1)
-        df_pie['custom_평가금액'] = df_pie['평가금액'].apply(lambda x: f"{x:,.0f}원")
-
-        df_pie.sort_values(by='비중(%)', ascending=False, inplace=True)
-
-        # 도넛 차트 생성 (매도대상 종목은 다른 색으로 표시)
-        trading_fig = go.Figure(
-            data=[go.Pie(
-                labels=df_pie['라벨'],
-                values=df_pie['평가금액'],
-                hole=0.4,
-                customdata=df_pie['custom_평가금액'],
-                hovertemplate='<b>%{label}</b><br><span style="color:red">평가금액: %{customdata[0]}</span><extra></extra>'
-            )]
-        )
-
-        trading_fig.update_layout(title='트레이딩 평가금액 비율')
-
-        # Streamlit에 출력
-        st.plotly_chart(trading_fig)
-
-    # 트레이딩매입금액 비율이 시장비율을 초과하면 매도 대상/수량 산정
-    # (simul/kis_market_ratio_rebalance.py의 build_rebalance_orders, allocate 참조)
-    SELL_COLOR = '#d03b3b'
-    HOLD_COLOR = '#2a78d6'
-    sell_qty_map = {}
-
-    if trading_eval_ratio > market_ratio and trading_holdings:
-        try:
-            strength_fn = _make_strength_fn(
-                {'access_token': access_token, 'app_key': app_key, 'app_secret': app_secret}, {}
-            )
-            quality_fn = lambda code_: 50.0  # 참고용 항목으로 매도 우선순위 산정에서는 제외
-
-            rebal_holdings = [dict(h) for h in trading_holdings if h['eval_sum'] > 0 and h['code'] != '']
-            orders, excess = build_rebalance_orders(
-                rebal_holdings, cash_amt, market_ratio, strength_fn, quality_fn
-            )
-            sell_qty_map = {h['code']: qty for h, qty in orders if qty > 0}
-
-            if sell_qty_map:
-                st.caption(
-                    f"⚠️ 트레이딩 평가금액 비율({trading_eval_ratio:.1f}%)이 시장비율({market_ratio}%)을 "
-                    f"초과 {len(sell_qty_map)}개 종목 매도 대상(초과금액 {excess:,.0f}원)"
-                )
-        except Exception as e:
-            st.warning(f"매도 대상 산정 중 오류가 발생했습니다: {e}")
-
-    sell_target_holdings = [h for h in trading_holdings if h['code'] != '']
-
-    if sell_target_holdings:
-        # 클릭 매도용 차트 - Plotly Pie(도넛)는 st.plotly_chart(on_select=...) 클릭 선택이
-        # 동작하지 않아(Plotly/Streamlit 자체 제약, 실측 확인) 가로 막대 차트로 표시한다.
-        trading_labels, trading_values, trading_colors, trading_texts = [], [], [], []
-        for h in sell_target_holdings:
-            if h['code'] in sell_qty_map:
-                trading_labels.append(f"{h['name']} (매도대상 {sell_qty_map[h['code']]:,}주)")
-                trading_colors.append(SELL_COLOR)
-            else:
-                trading_labels.append(h['name'])
-                trading_colors.append(HOLD_COLOR)
-            trading_values.append(h['eval_sum'])
-            trading_texts.append(f"{h['eval_sum']:,.0f}원")
-
-        trading_fig = go.Figure(
-            data=[go.Bar(
-                x=trading_values,
-                y=trading_labels,
-                orientation='h',
-                marker=dict(color=trading_colors),
-                text=trading_texts,
-                textposition='outside',
-                cliponaxis=False,
-                hovertemplate='<b>%{y}</b><br>평가금액: %{x:,.0f}원<extra></extra>'
-            )]
-        )
-        trading_fig.update_layout(
-            title='시장비율 초과 매도종목 (막대를 클릭하여 매도)',
-            xaxis=dict(title='평가금액(원)'),
-            yaxis=dict(autorange='reversed'),
-            showlegend=False,
-        )
-
-        sell_click_event = st.plotly_chart(
-            trading_fig, on_select="rerun", selection_mode="points", key="sell_target_chart"
-        )
-
-        clicked_points = sell_click_event.selection.points if sell_click_event and sell_click_event.selection else []
-
-        if clicked_points:
-            clicked_h = sell_target_holdings[clicked_points[0]['point_index']]
-
-            if clicked_h['code'] not in sell_qty_map:
-                st.info(f"{clicked_h['name']}은(는) 매도 대상이 아닙니다. (매도 대상 종목만 클릭해서 매도할 수 있습니다)")
-            else:
-                sell_qty = sell_qty_map[clicked_h['code']]
-                est_amt = sell_qty * clicked_h['current_price']
-
-                if st.session_state.get('sell_click_executed') == clicked_h['code']:
-                    st.info(f"{clicked_h['name']}[{clicked_h['code']}]은(는) 이미 매도 주문이 접수되었습니다. 다른 종목을 선택해주세요.")
-                else:
-                    st.warning(
-                        f"선택: **{clicked_h['name']}[{clicked_h['code']}]** {sell_qty:,}주 시장가 매도 "
-                        f"(현재가 {clicked_h['current_price']:,}원, 예상 매도금액 {est_amt:,}원)"
-                    )
-                    # (simul/kis_market_ratio_rebalance.py의 order_cash/record_sell 호출 부분 참조)
-                    if st.button(f"⚠️ {clicked_h['name']} {sell_qty:,}주 매도 실행", key=f"sell_confirm_{clicked_h['code']}"):
-                        tag = f"{clicked_h['name']}[{clicked_h['code']}] {sell_qty}주"
-                        ar = order_cash(False, access_token, app_key, app_secret,
-                                        str(acct_no), clicked_h["code"], "01", sell_qty, 0, excg_id="KRX")
-                        if ar.isOK():
-                            out = ar.getBody().output
-                            order_no = (out or {}).get("ODNO", "")
-                            st.success(f"✅ 매도접수 {tag} 주문번호={str(int(order_no))}")
-                            record_sell(conn, acct_no, clicked_h, sell_qty, clicked_h["current_price"], order_no, "Bar")
-                            st.session_state['sell_click_executed'] = clicked_h['code']
-                        else:
-                            st.error(f"❌ 매도실패 {tag}: {ar.getErrorCode()} {ar.getErrorMessage()}")
-
-    # 추가2) 투자매입금액 (trading_plan = 'i', proc_yn = 'Y')
-    data_invest = []
-    for name_, pur_price_, pur_amt_, pur_sum_, cur_price_, eval_sum_ in invest_rows:
-        invest_pur_sum = float(pur_sum_ or 0)
-        invest_eval_sum = float(eval_sum_ or 0)
-        invest_pfls_amt = invest_eval_sum - invest_pur_sum
-        invest_pfls_rt = (invest_pfls_amt / invest_pur_sum * 100) if invest_pur_sum != 0 else 0.0
-        data_invest.append({
-            '종목명': name_,
-            '매입단가': int(float(pur_price_ or 0)),
-            '매입수량': float(pur_amt_ or 0),
-            '매입금액': invest_pur_sum,
-            '현재가': int(float(cur_price_ or 0)),
-            '평가금액': invest_eval_sum,
-            '손익률(%)': invest_pfls_rt,
-            '손익금액': invest_pfls_amt,
-        })
-
-    df_invest = pd.DataFrame(data_invest)
-
-    invest_purchase_amt = df_invest['매입금액'].sum() if not df_invest.empty else 0.0
-    invest_eval_amt = df_invest['평가금액'].sum() if not df_invest.empty else 0.0
-    invest_profit_amt = invest_eval_amt - invest_purchase_amt
-    invest_profit_rate = (invest_profit_amt / invest_purchase_amt * 100) if invest_purchase_amt != 0 else 0.0
-
-    st.subheader("📊 투자")
-    col13, col14, col15 = st.columns(3)
-    col13.metric("매입금액", f"{invest_purchase_amt:,.0f}원")
-    col14.metric("평가금액", f"{invest_eval_amt:,.0f}원")
-    col15.metric("손익금액", f"{invest_profit_amt:,.0f}원", delta=f"{invest_profit_rate:+.2f}%")
-
-    if not df_invest.empty:
-        # 평가금액 기준 비중 계산
-        df_invest['비중(%)'] = df_invest['평가금액'] / df_invest['평가금액'].sum() * 100
-
-        # 비중 순으로 정렬
-        df_invest.sort_values(by='비중(%)', ascending=False, inplace=True)
-
-        # 순서 컬럼 추가 (1부터 시작)
-        df_invest.insert(0, '순서', range(1, len(df_invest) + 1))
-
-        df_display = df_invest.copy().reset_index(drop=True)
-
-        # Grid 옵션 생성
-        gb = GridOptionsBuilder.from_dataframe(df_display)
-        # 페이지당 20개 표시
-        gb.configure_pagination(enabled=True, paginationPageSize=20)
-        gb.configure_grid_options(domLayout='normal')
-        # Excel 다운로드를 위한 옵션 추가
-        gb.configure_grid_options(enableRangeSelection=True)
-        gb.configure_grid_options(enableExcelExport=True)
-
-        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-        auto_size_js = JsCode("""
-        function onFirstDataRendered(params) {
-            const allColumnIds = [];
-            params.columnApi.getAllColumns().forEach(function(column) {
-                allColumnIds.push(column.getId());
-            });
-            params.columnApi.autoSizeColumns(allColumnIds, false);
-        }
-        """)
-        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-        column_widths = {
-            '순서': 40,
-            '종목명': 140,
-            '매입단가': 80,
-            '매입수량': 70,
-            '매입금액': 100,
-            '현재가': 80,
-            '평가금액': 100,
-            '손익률(%)': 70,
-            '손익금액': 100,
-            '비중(%)': 70
-        }
-
-        # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-        number_format_js = JsCode("""
-            function(params) {
-                if (params.value === null || params.value === undefined) {
-                    return '';
-                }
-                return params.value.toLocaleString();
-            }
-        """)
-
-        percent_format_js = JsCode("""
-            function(params) {
-                if (params.value === null || params.value === undefined) {
-                    return '';
-                }
-                return params.value.toFixed(2) + '%';
-            }
-        """)
-
-        for col, width in column_widths.items():
-            if col in ['손익률(%)', '비중(%)']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-            elif col in ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익금액']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-            else:
-                gb.configure_column(col, width=width)
-
-        grid_options = gb.build()
-
-        # AgGrid를 통해 데이터 출력
-        AgGrid(
-            df_display,
-            gridOptions=grid_options,
-            fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
-            allow_unsafe_jscode=True,
-            use_container_width=True,
-            update_mode=GridUpdateMode.NO_UPDATE,
-            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-        )
-
-        df_pie = df_invest[df_invest['평가금액'] > 0].copy()
-
-        # 레이블 생성: 비중 종목명 (매입가, 손익률)
-        def format_invest_label(row):
-            profit_rate = f"{row['손익률(%)']:+.2f}%"
-            return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate}, {row['매입수량']:,.0f}주)"
-
-        df_pie['라벨'] = df_pie.apply(format_invest_label, axis=1)
-        df_pie['custom_평가금액'] = df_pie['평가금액'].apply(lambda x: f"{x:,.0f}원")
-
-        df_pie.sort_values(by='비중(%)', ascending=False, inplace=True)
-
-        # 도넛 차트 생성
-        invest_fig = go.Figure(
-            data=[go.Pie(
-                labels=df_pie['라벨'],
-                values=df_pie['평가금액'],
-                hole=0.4,
-                customdata=df_pie['custom_평가금액'],
-                hovertemplate='<b>%{label}</b><br><span style="color:red">평가금액: %{customdata[0]}</span><extra></extra>'
-            )]
-        )
-
-        invest_fig.update_layout(title='투자 평가금액 비율')
-
-        # Streamlit에 출력
-        st.plotly_chart(invest_fig)
-
-    st.subheader("📊 총 집계 정보")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("총 금액", f"{total_amt:,.0f}원")
-    col2.metric("현금", f"{cash_amt:,.0f}원")
-    col3.metric("시장비율", f"{market_ratio}/100", delta=f"{market_ratio - 50:+d}")
-    col4, col5, col6 = st.columns(3)
-    col4.metric("총 매입금액", f"{total_hold_amt:,.0f}원")
-    col5.metric("총 평가금액", f"{total_eval_amt:,.0f}원")
-    col6.metric("총 손익금액", f"{total_profit_amt:,.0f}원", delta=f"{profit_rate:+.2f}%")
-    
-    # 전체 평가금액 기준 비중 계산
-    df0['비중(%)'] = df0['평가금액'] / df0['평가금액'].sum() * 100
-
-    # 비중 순으로 정렬
-    df0.sort_values(by='비중(%)', ascending=False, inplace=True)
-
-    # 순서 컬럼 추가 (1부터 시작)
-    df0.insert(0, '순서', range(1, len(df0) + 1))
-
-    df_display = df0.copy().reset_index(drop=True)
-
-    # Grid 옵션 생성
-    gb = GridOptionsBuilder.from_dataframe(df_display)
-    # 페이지당 20개 표시
-    gb.configure_pagination(enabled=True, paginationPageSize=20)
-    gb.configure_grid_options(domLayout='normal')
-    # Excel 다운로드를 위한 옵션 추가
-    gb.configure_grid_options(enableRangeSelection=True)
-    gb.configure_grid_options(enableExcelExport=True)
-
-    # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-    auto_size_js = JsCode("""
-    function onFirstDataRendered(params) {
-        const allColumnIds = [];
-        params.columnApi.getAllColumns().forEach(function(column) {
-            allColumnIds.push(column.getId());
-        });
-        params.columnApi.autoSizeColumns(allColumnIds, false);
-    }
-    """)
-    gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-    
-    column_widths = {
-        '순서': 40,
-        '종목명': 140,
-        '매입단가': 80,
-        '매입수량': 70,
-        '매입금액': 100,
-        '현재가': 80,
-        '평가금액': 100,
-        '손익률(%)': 70,
-        '손익금액': 100,
-        '비중(%)': 70
-    }
-
-    # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-    number_format_js = JsCode("""
-        function(params) {
-            if (params.value === null || params.value === undefined) {
-                return '';
-            }
-            return params.value.toLocaleString();
-        }
-    """)
-
-    percent_format_js = JsCode("""
-        function(params) {
-            if (params.value === null || params.value === undefined) {
-                return '';
-            }
-            return params.value.toFixed(2) + '%';
-        }
-    """)
-
-    for col, width in column_widths.items():
-        if col in ['손익률(%)', '비중(%)']:
-            gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-        elif col in ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익금액']:
-            gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-        else:
-            gb.configure_column(col, width=width)
-    
-    grid_options = gb.build()
-
-    # AgGrid를 통해 데이터 출력
-    AgGrid(
-        df_display,
-        gridOptions=grid_options,
-        fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
-        allow_unsafe_jscode=True,
-        use_container_width=True,
-        update_mode=GridUpdateMode.NO_UPDATE,
-        enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-        excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-    )
-
-    df_pie = df0[df0['평가금액'] > 0].copy()
-
-    # 레이블 생성: 종목명 (매입단가) or 종목명 (평가금액)
-    def format_label(row):
-        if row['종목명'] == '현금':
-            return f"{row['비중(%)']:.1f}% {row['종목명']}"
-        else:
-            profit_rate = f"{row['손익률(%)']:+.2f}%"
-            return f"{row['비중(%)']:.1f}% {row['종목명']} (매입가 {row['매입단가']:,.0f}원, 손익률 {profit_rate}, {row['매입수량']:,.0f}주)"
-
-    df_pie['종목명'] = df_pie.apply(format_label, axis=1)
-    df_pie['custom_평가금액'] = df_pie['평가금액'].apply(lambda x: f"{x:,.0f}원")
-
-    df_pie.sort_values(by='비중(%)', ascending=False, inplace=True)
-
-    # 도넛 차트 생성
-    fig = go.Figure(
-        data=[go.Pie(
-            labels=df_pie['종목명'],
-            values=df_pie['평가금액'],
-            hole=0.4,
-            customdata=df_pie[['custom_평가금액']],
-            hovertemplate='<b>%{label}</b><br><span style="color:red">평가금액: %{customdata[0]}</span><extra></extra>'
-        )]
-    )
-
-    fig.update_layout(title='종목별 평가금액 비율')
-
-    # Streamlit에 출력
-    st.plotly_chart(fig)
+        st.plotly_chart(fig)
 
 code = ""
 # selected_date = st.slider(
