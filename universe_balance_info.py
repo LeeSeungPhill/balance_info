@@ -1453,7 +1453,7 @@ else:
     profit_rate = (total_profit_amt / total_hold_amt * 100) if total_hold_amt != 0 else 0.0
 
     # 시장비율 계산 (코스피/코스닥 단기, 중기, 장기 신호 조합)
-    market_state = fetch_market_state(conn, acct_no)
+    market_state = fetch_market_state(kis_conn, acct_no)
     market_ratio = compute_market_ratio(
         market_state['kospi_short'],  market_state['kospi_mid'],  market_state['kospi_long'],
         market_state['kosdak_short'], market_state['kosdak_mid'], market_state['kosdak_long'],
@@ -1529,7 +1529,7 @@ else:
     st.title("잔고정보 조회")
 
     # 트레이딩/투자 대상 조회 (public."stockBalance_stock_balance")
-    cur_trading = conn.cursor()
+    cur_trading = kis_conn.cursor()
     cur_trading.execute("""
         SELECT code, name, purchase_price, purchase_amount, purchase_sum, current_price, eval_sum,
                 COALESCE(avail_amount, purchase_amount, 0) AS avail_qty
@@ -1543,7 +1543,7 @@ else:
     trading_rows = cur_trading.fetchall()
     cur_trading.close()
 
-    cur_invest = conn.cursor()
+    cur_invest = kis_conn.cursor()
     cur_invest.execute("""
         SELECT name, purchase_price, purchase_amount, purchase_sum, current_price, eval_sum
             FROM "stockBalance_stock_balance"
@@ -2111,7 +2111,7 @@ strt_dt = (st.date_input("시작일", datetime(2026, 1, 1))).strftime("%Y%m%d")
 end_dt = (st.date_input("종료일", datetime.today())).strftime("%Y%m%d")
 
 # 기간별 총평가
-cur05 = conn.cursor()
+cur05 = kis_conn.cursor()
 period_profit_sum = """
     WITH base AS (
         SELECT
