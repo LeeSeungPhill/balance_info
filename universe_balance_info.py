@@ -243,8 +243,8 @@ else:
         st.plotly_chart(fig)
 
 # strt_dt = (st.date_input("시작일", datetime.today() - timedelta(days=30))).strftime("%Y%m%d")
-strt_dt = (st.date_input("시작일", datetime(2026, 1, 1))).strftime("%Y%m%d")
-end_dt = (st.date_input("종료일", datetime.today())).strftime("%Y%m%d")
+strt_dt = (st.date_input("시작일", datetime(2026, 1, 1), key="strt_dt_balance")).strftime("%Y%m%d")
+end_dt = (st.date_input("종료일", datetime.today(), key="end_dt_balance")).strftime("%Y%m%d")
 
 cur2 = conn.cursor()
 # 기간별 잔고정보 조회
@@ -1935,8 +1935,8 @@ code = ""
 # end_dt = selected_date[1].strftime("%Y%m%d")
 
 # strt_dt = (st.date_input("시작일", datetime.today() - timedelta(days=30))).strftime("%Y%m%d")
-strt_dt = (st.date_input("시작일", datetime(2026, 1, 1))).strftime("%Y%m%d")
-end_dt = (st.date_input("종료일", datetime.today())).strftime("%Y%m%d")
+strt_dt = (st.date_input("시작일", datetime(2026, 1, 1), key="strt_dt_profit")).strftime("%Y%m%d")
+end_dt = (st.date_input("종료일", datetime.today(), key="end_dt_profit")).strftime("%Y%m%d")
 
 # 기간별 총평가
 cur05 = kis_conn.cursor()
