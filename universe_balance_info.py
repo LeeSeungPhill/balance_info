@@ -23,8 +23,8 @@ KW_URL_BASE = "https://api.kiwoom.com"
 SOCKET_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"  # 접속 URL
 
 # PostgreSQL 연결 설정
-kis_conn_string = "dbname='fund_risk_mng' host='localhost' port='5432' user='postgres' password='asdf1234'"
-# kis_conn_string = "dbname='fund_risk_mng' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
+# kis_conn_string = "dbname='fund_risk_mng' host='localhost' port='5432' user='postgres' password='asdf1234'"
+kis_conn_string = "dbname='fund_risk_mng' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
 # DB 연결
 kis_conn = db.connect(kis_conn_string)
 
@@ -32,8 +32,8 @@ kis_nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phil
 # kis_nickname = ['yh480825']  
 
 # PostgreSQL 연결 설정
-conn_string = "dbname='universe' host='localhost' port='5432' user='postgres' password='asdf1234'"
-# conn_string = "dbname='universe' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
+# conn_string = "dbname='universe' host='localhost' port='5432' user='postgres' password='asdf1234'"
+conn_string = "dbname='universe' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
 # DB 연결
 conn = db.connect(conn_string)
 
@@ -1364,10 +1364,7 @@ else:
                 FROM "stockBalance_stock_balance"
                 WHERE acct_no = %s AND proc_yn = 'Y'
                 AND (trading_plan <> 'i' OR trading_plan IS NULL)
-            UNION ALL
-            SELECT 
-                '' AS code,	'현금' AS name,	0 AS purchase_price, 0 AS purchase_amount, 0 AS purchase_sum, 0 AS current_price, (SELECT prvs_rcdl_excc_amt FROM public."stockFundMng_stock_fund_mng" WHERE acct_no = %s) AS eval_sum,	0 AS avail_qty                
-        """, (str(acct_no),str(acct_no),))
+        """, (str(acct_no),))
         trading_rows = cur_trading.fetchall()
         cur_trading.close()
 
@@ -1393,13 +1390,14 @@ else:
         } for code_, name_, pur_price_, pur_amt_, pur_sum_, cur_price_, eval_sum_, avail_qty_ in trading_rows]
 
         trading_purchase_amt = sum(h['purchase_sum'] for h in trading_holdings)
-        trading_eval_amt = sum(h['eval_sum'] for h in trading_holdings) - cash_amt
+        trading_eval_amt = sum(h['eval_sum'] for h in trading_holdings)
+        trading_cash = 20000000 - trading_eval_amt if (20000000 - trading_eval_amt) < cash_amt else cash_amt
         trading_profit_amt = trading_eval_amt - trading_purchase_amt
         trading_profit_rate = (trading_profit_amt / trading_purchase_amt * 100) if trading_purchase_amt != 0 else 0.0
 
-        # base(운용 base) = 현금 + 트레이딩평가금액
-        trading_base = cash_amt + trading_eval_amt
-        trading_cash_ratio = (cash_amt / trading_base * 100) if trading_base > 0 else 0.0
+        # base(운용 base) = 트레이딩현금 + 트레이딩평가금액
+        trading_base = trading_cash + trading_eval_amt
+        trading_cash_ratio = (trading_cash / trading_base * 100) if trading_base > 0 else 0.0
         trading_eval_ratio = (trading_eval_amt / trading_base * 100) if trading_base > 0 else 0.0
 
         st.subheader("📊 트레이딩")
@@ -1409,13 +1407,26 @@ else:
         col09.metric("손익금액", f"{trading_profit_amt:,.0f}원", delta=f"{trading_profit_rate:+.2f}%")
         col10, col11, col12 = st.columns(3)
         col10.metric("트레이딩 총 금액", f"{trading_base:,.0f}원")
-        col11.metric("현금", f"{cash_amt:,.0f}원")
+        col11.metric("현금", f"{trading_cash:,.0f}원")
         col12.metric("현금(비중)", f"{trading_cash_ratio:.2f}%")
+
+        # 트레이딩현금을 종목별 상세/도넛에 표시하기 위해 trading_holdings 의 한 row 로 추가
+        # (code='' 이므로 이후 리밸런싱 대상 필터링(h['code'] != '')에서는 자동 제외됨)
+        trading_holdings.append({
+            'code': '',
+            'name': '현금',
+            'purchase_price': 0,
+            'purchase_amount': 0,
+            'purchase_sum': 0,
+            'current_price': 0,
+            'eval_sum': trading_cash,
+            'avail_qty': 0,
+        })
 
         # 트레이딩 종목별 상세 (총 집계 정보의 종목별 그리드/도넛과 동일한 패턴)
         data_trading = []
         for h in trading_holdings:
-            trading_pfls_amt = h['eval_sum'] - h['purchase_sum']
+            trading_pfls_amt = 0 if h['name'] == '현금' else h['eval_sum'] - h['purchase_sum']
             trading_pfls_rt = (trading_pfls_amt / h['purchase_sum'] * 100) if h['purchase_sum'] != 0 else 0.0
             data_trading.append({
                 '코드': h['code'],
@@ -1566,7 +1577,7 @@ else:
 
                 rebal_holdings = [dict(h) for h in trading_holdings if h['eval_sum'] > 0 and h['code'] != '']
                 orders, excess = build_rebalance_orders(
-                    rebal_holdings, cash_amt, market_ratio, strength_fn, quality_fn
+                    rebal_holdings, trading_cash, market_ratio, strength_fn, quality_fn
                 )
                 sell_qty_map = {h['code']: qty for h, qty in orders if qty > 0}
 
