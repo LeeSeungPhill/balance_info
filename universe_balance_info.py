@@ -1562,6 +1562,169 @@ else:
             # Streamlit에 출력
             st.plotly_chart(trading_fig)
 
+        # 시장관리 정보(매매금액/리스크금액/허용종목/시장흐름) 및 진행가능 종목수/잔여리스크 금액
+        market_mng_str = ""
+        with kis_conn.cursor() as cur_mng:
+            cur_mng.execute(
+                """SELECT total_asset, risk_sum, risk_rate, item_number, market_level_num, aply_start_dt
+                FROM public."stockMarketMng_stock_market_mng"
+                WHERE acct_no = %s AND aply_end_dt = '99991231'""",
+                (str(acct_no),)
+            )
+            row_mng = cur_mng.fetchone()
+
+        if row_mng:
+            mng_total_asset, mng_risk_sum, mng_risk_rate, mng_item_number, mng_market_level_num, mng_aply_start_dt = row_mng
+            mng_total_asset = int(mng_total_asset or 0)
+            mng_risk_sum = int(mng_risk_sum or 0)
+            mng_risk_rate = float(mng_risk_rate or 0)
+            mng_item_number = int(mng_item_number or 0)
+            mng_level_label = {"1": "시장상승", "2": "시장하락", "3": "시장패턴"}.get(str(mng_market_level_num), str(mng_market_level_num))
+
+            # 진행가능 종목수 = 허용종목 - 진행중(trail_tp '1','2') 종목수
+            with kis_conn.cursor() as cur_prog:
+                cur_prog.execute(
+                    """SELECT DISTINCT code FROM trading_trail
+                    WHERE acct_no = %s AND trail_day = %s AND trail_tp IN ('1','2')""",
+                    (str(acct_no), end_dt)
+                )
+                progressing_codes = [row[0] for row in cur_prog.fetchall()]
+
+            # 진행중(trail_tp '1','2') 종목 상세 (손절금액 산정 및 아래 진행종목 AG grid 표시에 공용 사용)
+            progress_rows = []
+            if progressing_codes:
+                with kis_conn.cursor() as cur_loss:
+                    cur_loss.execute(
+                        """SELECT code, name, purchase_price, purchase_amount, purchase_sum,
+                                current_price, eval_sum, end_loss_price
+                        FROM public."stockBalance_stock_balance"
+                        WHERE acct_no = %s AND proc_yn = 'Y' AND purchase_amount > 0 AND end_loss_price > 0
+                        AND code = ANY(%s)""",
+                        (str(acct_no), progressing_codes)
+                    )
+                    progress_rows = cur_loss.fetchall()
+
+            # 잔여리스크 금액 = 리스크금액 - 손절금액(진행중 종목 합산)
+            loss_amt_sum = sum(int((float(r[2] or 0) - float(r[7] or 0)) * float(r[3] or 0)) for r in progress_rows)
+            remaining_risk = mng_risk_sum - loss_amt_sum
+
+            mng_aply_start_dt_str = str(mng_aply_start_dt)
+            if len(mng_aply_start_dt_str) == 8:
+                mng_aply_start_dt_str = f"{mng_aply_start_dt_str[:4]}-{mng_aply_start_dt_str[4:6]}-{mng_aply_start_dt_str[6:8]}"
+
+            col16, col17, col18 = st.columns(3)
+            col16.markdown(f"**시장흐름(적용일자)**<br><span style='font-size:1.2rem'>{mng_level_label}({mng_aply_start_dt_str})</span>", unsafe_allow_html=True)
+            col17.markdown(f"**허용종목수(진행)**<br><span style='font-size:1.2rem'>{mng_item_number}개({len(progressing_codes)}개)</span>", unsafe_allow_html=True)
+            col18.markdown(f"**리스크(%)-리스크금액(잔여)**<br><span style='font-size:1.2rem'>{mng_risk_rate:.1f}%-{mng_risk_sum:,}원({remaining_risk:,}원)</span>", unsafe_allow_html=True)
+
+            # 진행중(trail_tp '1','2') 종목 상세 (위 트레이딩 AG grid 패턴 참조 + 최종이탈가/손절율/손절금액 추가)
+            data_progress = []
+            for code_, name_, pur_price_, pur_amt_, pur_sum_, cur_price_, eval_sum_, end_loss_price_ in progress_rows:
+                pur_price_ = float(pur_price_ or 0)
+                pur_amt_ = float(pur_amt_ or 0)
+                pur_sum_ = float(pur_sum_ or 0)
+                cur_price_ = float(cur_price_ or 0)
+                eval_sum_ = float(eval_sum_ or 0)
+                end_loss_price_ = float(end_loss_price_ or 0)
+                progress_pfls_amt = eval_sum_ - pur_sum_
+                progress_pfls_rt = (progress_pfls_amt / pur_sum_ * 100) if pur_sum_ != 0 else 0.0
+                loss_rate = ((pur_price_ - end_loss_price_) / pur_price_ * 100) if pur_price_ != 0 else 0.0
+                loss_amt = (pur_price_ - end_loss_price_) * pur_amt_
+                data_progress.append({
+                    '코드': code_,
+                    '종목명': name_,
+                    '매입단가': int(pur_price_),
+                    '매입수량': int(pur_amt_),
+                    '매입금액': int(pur_sum_),
+                    '최종이탈가': int(end_loss_price_),
+                    '리스크(%)': loss_rate,
+                    '리스크금액': int(loss_amt),
+                })
+
+            df_progress = pd.DataFrame(data_progress)
+
+            if not df_progress.empty:
+                st.subheader("🎯 진행종목 리스크금액")
+
+                df_progress.sort_values(by='리스크금액', ascending=False, inplace=True)
+                df_progress.insert(0, '순서', range(1, len(df_progress) + 1))
+                df_display = df_progress.copy().reset_index(drop=True)
+
+                # Grid 옵션 생성
+                gb = GridOptionsBuilder.from_dataframe(df_display)
+                # 코드 컬럼 숨기기
+                gb.configure_column('코드', hide=True)
+                # 페이지당 20개 표시
+                gb.configure_pagination(enabled=True, paginationPageSize=20)
+                gb.configure_grid_options(domLayout='normal')
+                # Excel 다운로드를 위한 옵션 추가
+                gb.configure_grid_options(enableRangeSelection=True)
+                gb.configure_grid_options(enableExcelExport=True)
+
+                # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
+                progress_auto_size_js = JsCode("""
+                function onFirstDataRendered(params) {
+                    const allColumnIds = [];
+                    params.columnApi.getAllColumns().forEach(function(column) {
+                        allColumnIds.push(column.getId());
+                    });
+                    params.columnApi.autoSizeColumns(allColumnIds, false);
+                }
+                """)
+                gb.configure_grid_options(onFirstDataRendered=progress_auto_size_js)
+
+                progress_column_widths = {
+                    '순서': 40,
+                    '종목명': 140,
+                    '매입단가': 80,
+                    '매입수량': 70,
+                    '매입금액': 100,
+                    '최종이탈가': 80,
+                    '리스크(%)': 70,
+                    '리스크금액': 100,
+                }
+
+                # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+                progress_number_format_js = JsCode("""
+                    function(params) {
+                        if (params.value === null || params.value === undefined) {
+                            return '';
+                        }
+                        return params.value.toLocaleString();
+                    }
+                """)
+
+                progress_percent_format_js = JsCode("""
+                    function(params) {
+                        if (params.value === null || params.value === undefined) {
+                            return '';
+                        }
+                        return params.value.toFixed(2) + '%';
+                    }
+                """)
+
+                for col, width in progress_column_widths.items():
+                    if col in ['리스크(%)']:
+                        gb.configure_column(col, type=['numericColumn'], cellRenderer=progress_percent_format_js, width=width)
+                    elif col in ['매입단가', '매입수량', '매입금액', '최종이탈가', '리스크금액']:
+                        gb.configure_column(col, type=['numericColumn'], cellRenderer=progress_number_format_js, width=width)
+                    else:
+                        gb.configure_column(col, width=width)
+
+                progress_grid_options = gb.build()
+
+                # AgGrid를 통해 데이터 출력
+                AgGrid(
+                    df_display,
+                    gridOptions=progress_grid_options,
+                    fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
+                    allow_unsafe_jscode=True,
+                    use_container_width=True,
+                    update_mode=GridUpdateMode.NO_UPDATE,
+                    enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+                    excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+                )
+
         # 트레이딩매입금액 비율이 시장비율을 초과하면 매도 대상/수량 산정
         # (simul/kis_market_ratio_rebalance.py의 build_rebalance_orders, allocate 참조)
         SELL_COLOR = '#d03b3b'
@@ -1582,9 +1745,10 @@ else:
                 sell_qty_map = {h['code']: qty for h, qty in orders if qty > 0}
 
                 if sell_qty_map:
-                    st.caption(
-                        f"⚠️ 트레이딩 평가금액 비율({trading_eval_ratio:.1f}%)이 시장비율({market_ratio}%)을 "
-                        f"초과 {len(sell_qty_map)}개 종목 매도 대상(초과금액 {excess:,.0f}원)"
+                    st.markdown(
+                        f"<br><span style='font-size:1.6rem'>⚠️ 시장비율({market_ratio}%) 초과한 트레이딩 비율({trading_eval_ratio:.1f}%)<br>"
+                        f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; → {len(sell_qty_map)}개 종목 매도 대상(초과금액 {excess:,.0f}원)</span>",
+                        unsafe_allow_html=True
                     )
             except Exception as e:
                 st.warning(f"매도 대상 산정 중 오류가 발생했습니다: {e}")
