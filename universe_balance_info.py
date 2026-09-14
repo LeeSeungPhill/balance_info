@@ -996,7 +996,7 @@ def stock_balance(access_token, app_key, app_secret, acct_no):
     params = {
                 "CANO": acct_no,                # 종합계좌번호 계좌번호 체계(8-2)의 앞 8자리
                 'ACNT_PRDT_CD': '01',           # 계좌상품코드 계좌번호 체계(8-2)의 뒤 2자리
-                'AFHR_FLPR_YN': 'N' if '0900' <= t < '1530' else 'X',            # N : 기본값, Y : 시간외단일가, X : NXT 정규장 (프리마켓, 메인, 애프터마켓) NXT 거래종목만 시세 등 정보가 NXT 기준으로 변동됩니다. KRX 종목들은 그대로 유지
+                'AFHR_FLPR_YN': 'N',            # N : 기본값, Y : 시간외단일가, X : NXT 정규장 (프리마켓, 메인, 애프터마켓) NXT 거래종목만 시세 등 정보가 NXT 기준으로 변동됩니다. KRX 종목들은 그대로 유지
                 'OFL_YN': '',                   # 오프라인여부 공란(Default)
                 'INQR_DVSN': '02',              # 조회구분 01 : 대출일별, 02 : 종목별
                 'UNPR_DVSN': '01',              # 단가구분 01 : 기본값 
