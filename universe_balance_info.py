@@ -905,6 +905,9 @@ def _make_strength_fn(ac, cache):
 def order_cash(buy_flag, access_token, app_key, app_secret, acct_no, stock_code,
                ord_dvsn, order_qty, order_price, excg_id="KRX"):
     """현금 주문. 매도=False(TTTC0011U). 시장가=ord_dvsn '01', order_price '0'."""
+    t = datetime.now().strftime('%H%M')
+    if '1600' <= t < '2000':  # KRX 애프터마켓 단일가
+        ord_dvsn = "41"
     tr_id = "TTTC0012U" if buy_flag else "TTTC0011U"
     params = {"CANO": acct_no, "ACNT_PRDT_CD": "01", "PDNO": stock_code,
               "ORD_DVSN": ord_dvsn, "ORD_QTY": str(order_qty), "ORD_UNPR": str(order_price),
@@ -996,7 +999,7 @@ def stock_balance(access_token, app_key, app_secret, acct_no):
     params = {
                 "CANO": acct_no,                # 종합계좌번호 계좌번호 체계(8-2)의 앞 8자리
                 'ACNT_PRDT_CD': '01',           # 계좌상품코드 계좌번호 체계(8-2)의 뒤 2자리
-                'AFHR_FLPR_YN': 'N',            # N : 기본값, Y : 시간외단일가, X : NXT 정규장 (프리마켓, 메인, 애프터마켓) NXT 거래종목만 시세 등 정보가 NXT 기준으로 변동됩니다. KRX 종목들은 그대로 유지
+                'AFHR_FLPR_YN': 'Y',            # N : KRX정규장종가, X : NXT, Y : KRX+NXT 통합시세
                 'OFL_YN': '',                   # 오프라인여부 공란(Default)
                 'INQR_DVSN': '02',              # 조회구분 01 : 대출일별, 02 : 종목별
                 'UNPR_DVSN': '01',              # 단가구분 01 : 기본값 
