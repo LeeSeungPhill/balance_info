@@ -2524,7 +2524,7 @@ position_pnl = """
     order by exit_dt, name
 """
 
-cur06 = conn.cursor()
+cur06 = kis_conn.cursor()
 cur06.execute(position_pnl, (str(acct_no), hist_strt_dt, strt_dt, end_dt))
 result_six = cur06.fetchall()
 cur06.close()
