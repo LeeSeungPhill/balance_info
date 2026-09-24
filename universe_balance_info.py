@@ -31,6 +31,10 @@ kis_conn = db.connect(kis_conn_string)
 kis_nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
 # kis_nickname = ['yh480825']  
 
+# URL 쿼리 파라미터(?nickname=)로 전달된 닉네임이 있으면 기본 선택값으로 사용
+query_nickname = st.query_params.get('nickname')
+default_index = kis_nickname.index(query_nickname) if query_nickname in kis_nickname else 0
+
 # PostgreSQL 연결 설정
 # conn_string = "dbname='universe' host='localhost' port='5432' user='postgres' password='asdf1234'"
 conn_string = "dbname='universe' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
@@ -1224,7 +1228,7 @@ def order_reserve_complete(access_token, app_key, app_secret, reserce_strt_dt, r
     return ar.getBody().output    
 
 st.title("<KIS>")
-kis_my_choice = st.selectbox('KIS 닉네임을 선택하세요', kis_nickname)   
+kis_my_choice = st.selectbox('KIS 닉네임을 선택하세요', kis_nickname, index=default_index)
 
 ac = account(kis_my_choice)
 acct_no = ac['acct_no']

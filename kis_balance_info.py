@@ -686,7 +686,12 @@ def order_reserve_complete(access_token, app_key, app_secret, reserce_strt_dt, r
 
 nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
 # nickname = ['yh480825']
-my_choice = st.selectbox('닉네임을 선택하세요', nickname)   
+
+# URL 쿼리 파라미터(?nickname=)로 전달된 닉네임이 있으면 기본 선택값으로 사용
+query_nickname = st.query_params.get('nickname')
+default_index = nickname.index(query_nickname) if query_nickname in nickname else 0
+
+my_choice = st.selectbox('닉네임을 선택하세요', nickname, index=default_index)
 
 ac = account(my_choice)
 acct_no = ac['acct_no']
