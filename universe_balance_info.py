@@ -106,7 +106,7 @@ else:
         st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
     else:
         # Streamlit 앱 구성
-        st.title("계좌현황")
+        st.title("BIT 계좌현황")
         
         total_amt = df0['평가금액'].sum()
         cash_amt = df0[df0['종목명'] == 'KRW-KRW']['평가금액'].sum()
@@ -290,7 +290,7 @@ if df01.empty:
     st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
     # Streamlit 앱 구성
-    st.title("기간별 총평가")
+    st.title("BIT 기간별 총평가")
 
     df01['일자'] = pd.to_datetime(df01['일자']).dt.strftime('%Y-%m-%d')
 
@@ -480,7 +480,7 @@ else:
         st.warning("일별주문체결조회된 데이터가 없습니다. 조건을 확인해주세요.")
     else:
         # Streamlit 앱 구성
-        st.title("일별 주문체결 조회")
+        st.title("BIT 일별 주문체결 조회")
 
         # 주문유형 필터
         all_types = df4['주문유형'].unique()
@@ -1357,7 +1357,7 @@ else:
 
         st.plotly_chart(market_fig)
 
-        st.title("계좌현황")
+        st.title("KIS 계좌현황")
 
         # 트레이딩/투자 대상 조회 (public."stockBalance_stock_balance")
         cur_trading = kis_conn.cursor()
@@ -2305,7 +2305,7 @@ df03 = pd.DataFrame(data03)
 if df03.empty:
     st.warning("기간별 총평가 조회된 데이터가 없습니다. 조건을 확인해주세요.")
 else:
-    st.title("기간별 총평가")
+    st.title("KIS 기간별 총평가")
 
     df03['일자'] = pd.to_datetime(df03['일자']).dt.strftime('%Y-%m-%d')
 
@@ -2465,67 +2465,168 @@ if not result3:
     print("손익합산조회 결과가 없습니다.")
 else:
 
-    data3 = []
-    
-    data3.append({
-        '매수정산금액 합계': float(result3['buy_excc_amt_smtl']),    # 매수정산금액 합계
-        '매도정산금액 합계': float(result3['sll_excc_amt_smtl']),    # 매도정산금액 합계
-        '총정산금액': float(result3['tot_excc_amt']),                # 총정산금액
-        '총실현손익': float(result3['tot_rlzt_pfls']),        # 총실현손익
-        '총수수료': float(result3['tot_fee']),                       # 총수수료
-        '총제세금': float(result3['tot_tltx']),                      # 총제세금
+    # 손익 합산 지표 표시
+    st.title("KIS 손익 합산 조회")
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("매수정산금액 합계", f"{float(result3['buy_excc_amt_smtl']):,.0f}원")
+    s2.metric("매도정산금액 합계", f"{float(result3['sll_excc_amt_smtl']):,.0f}원")
+    s3.metric("총정산금액", f"{float(result3['tot_excc_amt']):,.0f}원")
+
+    s4, s5, s6 = st.columns(3)
+    s4.metric("총실현손익", f"{float(result3['tot_rlzt_pfls']):,.0f}원")
+    s5.metric("총수수료", f"{float(result3['tot_fee']):,.0f}원")
+    s6.metric("총제세금", f"{float(result3['tot_tltx']):,.0f}원")
+
+# 종목별 포지션 손익 조회 (진입~전량청산 단위, 조회기간 내 청산 완료 포지션)
+# 진입 시점을 찾기 위해 체결내역은 시작일 1년 전부터 누적
+hist_strt_dt = (datetime.strptime(strt_dt, "%Y%m%d") - relativedelta(years=1)).strftime("%Y%m%d")
+
+position_pnl = """
+    with recursive fills as (
+        select name, order_dt, order_tmd, order_type,
+            order_price::numeric as price, total_complete_qty::numeric as qty, hold_price::numeric as hold_price,
+            case when order_type like '%%매수%%' then 1 else -1 end as side,
+            row_number() over (partition by name order by order_dt, order_tmd, id) as rn
+        from public."stockOrderComplete_stock_order_complete"
+        where acct_no = %s and order_dt >= %s
+        and total_complete_qty::numeric > 0
+        and order_type not like '%%취소%%' and order_type not like '%%거부%%'
+    ),
+    walk as (   -- 보유수량 누적(음수는 0으로 클램프), 직전 보유 0이면 새 포지션 번호
+        select f.*, greatest(f.side * f.qty, 0) as cum_qty, 1 as pos_no, 0::numeric as prev_qty
+        from fills f where f.rn = 1
+        union all
+        select f.*, greatest(w.cum_qty + f.side * f.qty, 0),
+            case when w.cum_qty = 0 then w.pos_no + 1 else w.pos_no end, w.cum_qty
+        from walk w join fills f on f.name = w.name and f.rn = w.rn + 1
+    ),
+    positions as (
+        select name, pos_no,
+            min(order_dt) as entry_dt,
+            (array_agg(price order by rn) filter (where side = 1))[1] as entry_price,
+            max(order_dt) as exit_dt,
+            count(*) filter (where side = 1)  as buy_cnt,
+            count(*) filter (where side = -1) as sell_cnt,
+            sum(qty) filter (where side = 1)  as buy_qty,
+            sum(price * qty) filter (where side = 1) as buy_amt,
+            sum(qty * (price - hold_price)) filter (where side = -1) as pnl,
+            sum(qty * hold_price) filter (where side = -1) as cost_sold,
+            (array_agg(cum_qty order by rn desc))[1] as last_qty,
+            bool_or(side = 1 and prev_qty = 0) as opened_in_window
+        from walk group by name, pos_no
+    )
+    select name, entry_dt, entry_price, exit_dt, buy_cnt, sell_cnt, buy_qty, buy_amt,
+        pnl, cost_sold, round(pnl / nullif(cost_sold, 0), 6) as pnl_rate
+    from positions
+    where opened_in_window and last_qty = 0 and sell_cnt > 0
+    and exit_dt >= %s and exit_dt <= %s
+    order by exit_dt, name
+"""
+
+cur06 = conn.cursor()
+cur06.execute(position_pnl, (str(acct_no), hist_strt_dt, strt_dt, end_dt))
+result_six = cur06.fetchall()
+cur06.close()
+
+data06 = []
+for item in result_six:
+    entry_price = float(item[2]) if item[2] is not None else 0.0
+    buy_qty = float(item[6]) if item[6] is not None else 0.0
+    realized_pnl = float(item[8]) if item[8] is not None else 0.0
+    # 매도가 = 진입가 + 실현손익 / 매수수량
+    sell_price = round(entry_price + realized_pnl / buy_qty) if buy_qty > 0 else 0.0
+    data06.append({
+        '종목명':     item[0],
+        '진입일':     item[1],
+        '진입가':     entry_price,
+        '청산일':     item[3],
+        '매도가':     sell_price,
+        '매수금액':   float(item[7]) if item[7] is not None else 0.0,
+        '실현손익':   int(realized_pnl),
+        '수익률(%)':  round(float(item[10]) * 100, 2) if item[10] is not None else 0.0,
     })
 
-    df3 = pd.DataFrame(data3)
+df06 = pd.DataFrame(data06)
 
-    if df3.empty:
-        st.warning("손익합산조회된 데이터가 없습니다. 조건을 확인해주세요.")
-    else:
-        # Streamlit 앱 구성
-        st.title("KIS 손익 합산 조회")
+if df06.empty:
+    st.warning("종목별 손익 조회된 데이터가 없습니다. 조건을 확인해주세요.")
+else:
+    st.title("KIS 종목별 손익 조회")
 
-        df_display = df3.copy().reset_index(drop=True)
+    # 승률 / 손익비 집계
+    wins = df06[df06['실현손익'] > 0]
+    losses = df06[df06['실현손익'] < 0]
+    total_cnt = len(df06)
+    win_rate = len(wins) / total_cnt * 100 if total_cnt > 0 else 0.0
+    avg_win = wins['실현손익'].mean() if not wins.empty else 0.0
+    avg_loss = abs(losses['실현손익'].mean()) if not losses.empty else 0.0
+    payoff_ratio = avg_win / avg_loss if avg_loss > 0 else None
+    gross_win = wins['실현손익'].sum()
+    gross_loss = abs(losses['실현손익'].sum())
 
-        # Grid 옵션 생성
-        gb = GridOptionsBuilder.from_dataframe(df_display)
-        gb.configure_pagination(enabled=False) 
-        gb.configure_grid_options(domLayout='autoHeight')
+    m1, m2, m3= st.columns(3)
+    m1.metric("승률(건수)", f"{win_rate:.1f}%({total_cnt}건)", f"수익 {len(wins)}건 / 손실 {len(losses)}건", delta_color="off")
+    m2.metric("손익비 (평균수익/평균손실)", f"{payoff_ratio:.2f}" if payoff_ratio is not None else "-",
+              f"{avg_win:,.0f}원 / {avg_loss:,.0f}원", delta_color="off")
+    m3.metric("실현손익 합계", f"{df06['실현손익'].sum():,.0f}원")
 
-        column_widths = {
-            '매수정산금액 합계': 100,
-            '매도정산금액 합계': 100,
-            '총정산금액': 120,
-            '총실현손익': 80,
-            '총수수료': 60,
-            '총제세금': 60,
-        }
+    df_display = df06.copy().reset_index(drop=True)
 
-        # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
-        number_format_js = JsCode("""
-            function(params) {
-                if (params.value === null || params.value === undefined) {
-                    return '';
-                }
-                return params.value.toLocaleString();
+    # Grid 옵션 생성
+    gb = GridOptionsBuilder.from_dataframe(df_display)
+    gb.configure_pagination(enabled=True, paginationPageSize=20)
+    gb.configure_grid_options(domLayout='normal')
+
+    column_widths = {
+        '진입가': 80,
+        '매도가': 80,
+        '매수금액': 100,
+        '실현손익': 90,
+        '수익률(%)': 70,
+    }
+
+    # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+    number_format_js = JsCode("""
+        function(params) {
+            if (params.value === null || params.value === undefined) {
+                return '';
             }
-        """)
+            return params.value.toLocaleString();
+        }
+    """)
 
-        # 숫자 포맷을 적용할 컬럼들 설정
-        for col, width in column_widths.items():
+    # 손익 부호에 따라 색상 적용
+    pnl_style_js = JsCode("""
+        function(params) {
+            if (params.value > 0) { return {'color': 'red'}; }
+            if (params.value < 0) { return {'color': 'blue'}; }
+            return {};
+        }
+    """)
+
+    gb.configure_column('종목명', width=120, pinned='left')
+    gb.configure_column('진입일', width=80)
+    gb.configure_column('청산일', width=80)
+
+    for col, width in column_widths.items():
+        if col in ('실현손익', '수익률(%)'):
+            gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, cellStyle=pnl_style_js, width=width)
+        else:
             gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
 
-        grid_options = gb.build()
+    grid_options = gb.build()
 
-        # AgGrid를 통해 데이터 출력
-        AgGrid(
-            df_display,
-            gridOptions=grid_options,
-            fit_columns_on_grid_load=False, 
-            allow_unsafe_jscode=True,
-            update_mode=GridUpdateMode.NO_UPDATE,
-            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
-        )
+    AgGrid(
+        df_display,
+        gridOptions=grid_options,
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True,
+        use_container_width=True,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+        excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+    )
 
 # 일별주문체결조회
 result4 = get_my_complete(access_token, app_key, app_secret, acct_no, strt_dt, end_dt)
@@ -2699,7 +2800,7 @@ if len(output) > 0:
         st.warning("조회된 데이터가 없습니다. 조건을 확인해주세요.")
     else:
         # Streamlit 앱 구성
-        st.title("예약정보 조회")
+        st.title("KIS 예약정보 조회")
         
         all_types = reserve_df['예약구분'].unique()
         예약구분리스트 = [t for t in all_types if t in ('현금매수', '현금매도')]
