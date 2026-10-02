@@ -2313,7 +2313,7 @@ else:
 
     df03['일자'] = pd.to_datetime(df03['일자']).dt.strftime('%Y-%m-%d')
 
-    if st.button('기간별 충평가 상세 데이터'):
+    if st.button('기간별 총평가 상세 데이터'):
 
         df_display = df03.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
@@ -2631,6 +2631,31 @@ else:
         enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
         excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
     )
+
+    # 보유일 / 보유종목수 / 투입자금 집계 (영업일 기준, 진입일·청산일 포함, 공휴일 미반영)
+    entry_ts = pd.to_datetime(df06['진입일'], format='%Y%m%d')
+    exit_ts = pd.to_datetime(df06['청산일'], format='%Y%m%d')
+    hold_days = pd.Series([len(pd.bdate_range(s, e)) for s, e in zip(entry_ts, exit_ts)])
+
+    # 조회기간 내 영업일별 동시 보유종목수와 투입자금(보유 포지션의 매수금액 합)
+    span_strt = max(entry_ts.min(), pd.to_datetime(strt_dt, format='%Y%m%d'))
+    span_end = min(exit_ts.max(), pd.to_datetime(end_dt, format='%Y%m%d'))
+    daily_cnt, daily_cap = [], []
+    for d in pd.bdate_range(span_strt, span_end):
+        holding = (entry_ts <= d) & (exit_ts >= d)
+        daily_cnt.append(int(holding.sum()))
+        daily_cap.append(df06.loc[holding, '매수금액'].sum())
+    daily_cnt = pd.Series(daily_cnt, dtype=float)
+    daily_cap = pd.Series(daily_cap, dtype=float)
+
+    h1, h2, h3 = st.columns(3)
+    h1.metric("평균 종목 보유일", f"{hold_days.mean():.1f}일", f"최대 {hold_days.max()}일", delta_color="off")
+    h2.metric("평균 종목 보유 갯수",
+              f"{daily_cnt.mean():.1f}종목" if not daily_cnt.empty else "-",
+              f"최대 {daily_cnt.max():.0f}종목" if not daily_cnt.empty else None, delta_color="off")
+    h3.metric("평균 투입 자금",
+              f"{daily_cap.mean():,.0f}원" if not daily_cap.empty else "-",
+              f"최대 {daily_cap.max():,.0f}원" if not daily_cap.empty else None, delta_color="off")
 
 # 일별주문체결조회
 result4 = get_my_complete(access_token, app_key, app_secret, acct_no, strt_dt, end_dt)
