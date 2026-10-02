@@ -299,7 +299,7 @@ else:
     df01['일자'] = pd.to_datetime(df01['일자']).dt.strftime('%Y-%m-%d')
 
     # 버튼을 클릭하면, 데이터프레임이 보이도록 만들기.
-    if st.button('기간별 총평가 상세 데이터'):
+    if st.button('기간별 총평가 상세 데이터', key='period_detail_crypto'):
 
         df_display = df01.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
@@ -489,7 +489,7 @@ else:
         # 주문유형 필터
         all_types = df4['주문유형'].unique()
         주문유형리스트 = [t for t in all_types if t in ('매수', '매도')]
-        선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트)
+        선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트, key='order_type_crypto')
 
         # 주문상태 필터
         all_states = df4['주문상태'].unique()
@@ -2313,7 +2313,7 @@ else:
 
     df03['일자'] = pd.to_datetime(df03['일자']).dt.strftime('%Y-%m-%d')
 
-    if st.button('기간별 총평가 상세 데이터'):
+    if st.button('기간별 총평가 상세 데이터', key='period_detail_kis'):
 
         df_display = df03.sort_values(by='일자', ascending=False).copy().reset_index(drop=True)
 
@@ -2701,7 +2701,7 @@ else:
 
         all_types = df4['주문유형'].unique()
         주문유형리스트 = [t for t in all_types if t in ('현금매수', '현금매도', '매수정정*', '매도정정*')]
-        선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트)
+        선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트, key='order_type_kis')
 
         선택주문유형_df = df4[df4['주문유형'] == 선택주문유형].copy()
 
