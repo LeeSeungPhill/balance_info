@@ -44,7 +44,11 @@ select1 = """
         A.regr_id,
         A.reg_date, 
         A.chgr_id, 
-        A.chg_date
+        A.chg_date,
+        A.action_price,
+        A.stop_price,
+        A.trading_plan,
+        A.exit_price
     from balance_info A, cust_mng B
     where A.cust_num = B.cust_num
     and B.market_name = %s
@@ -74,6 +78,10 @@ else:
             '평가금액': float(item[12]),
             '손익률(%)': float(item[7]) if item[7] is not None else 0.0,
             '손익금액': float(item[12]) - float(item[6]),
+            '수행가': float(item[20]) if item[20] is not None else 0.0,
+            '이탈가': float(item[21]) if item[21] is not None else 0.0,
+            '최종이탈가': float(item[23]) if item[23] is not None else 0.0,
+            'trading_plan': item[22],
         })     
 
     df0 = pd.DataFrame(data0)
@@ -105,47 +113,55 @@ else:
         # 전체 평가금액 기준 비중 계산
         df0['비중(%)'] = df0['평가금액'] / df0['평가금액'].sum() * 100
 
-        # 비중 순으로 정렬
-        df0.sort_values(by='비중(%)', ascending=False, inplace=True)
+        # 수행가/이탈가/최종이탈가 (balance_info 컬럼, 편집 시 같은 시장 모든 계좌의 해당 종목에 반영)
+        price_cols = {
+            '수행가': 'action_price',
+            '이탈가': 'stop_price',
+            '최종이탈가': 'exit_price',
+        }
 
-        # 순서 컬럼 추가 (1부터 시작)
-        df0.insert(0, '순서', range(1, len(df0) + 1))
+        # 매매계획 (trading_plan): 일반=NULL, 투자='i', 홀딩='h'
+        # 현금(KRW-KRW) 행은 '' 로 표시하고 편집 불가
+        plan_labels = {None: '일반', 'i': '투자', 'h': '홀딩'}
+        plan_values = {v: k for k, v in plan_labels.items()}
+        df0.insert(df0.columns.get_loc('종목명') + 1, '매매계획', [
+            '' if prd == 'KRW-KRW' else plan_labels.get(plan or None, plan)
+            for prd, plan in zip(df0['종목명'], df0['trading_plan'])
+        ])
+        df0.drop(columns=['trading_plan'], inplace=True)
 
-        df_display = df0.copy().reset_index(drop=True)
+        # 현재가가 존재하는 종목은 손익금액 내림차순, 현재가 없는 항목(현금 등)은 맨 아래
+        df_display = pd.concat([
+            df0[df0['현재가'] > 0].sort_values(by='손익금액', ascending=False),
+            df0[~(df0['현재가'] > 0)],
+        ]).reset_index(drop=True)
+
+        # 종목명, 매매계획을 맨 앞 항목으로 배치
+        df_display = df_display[['종목명', '매매계획'] + [c for c in df_display.columns if c not in ('종목명', '매매계획')]]
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
         # 페이지당 20개 표시
-        gb.configure_pagination(enabled=True, paginationPageSize=20)
+        gb.configure_pagination(enabled=True, paginationAutoPageSize=False, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
         # Excel 다운로드를 위한 옵션 추가
         gb.configure_grid_options(enableRangeSelection=True)
         gb.configure_grid_options(enableExcelExport=True)
 
-        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-        auto_size_js = JsCode("""
-        function onFirstDataRendered(params) {
-            const allColumnIds = [];
-            params.columnApi.getAllColumns().forEach(function(column) {
-                allColumnIds.push(column.getId());
-            });
-            params.columnApi.autoSizeColumns(allColumnIds, false);
-        }
+        # 각 컬럼을 셀 내용·컬럼명이 모두 보이는 너비로 자동 맞춤
+        # 화면 밖 컬럼도 측정되도록 컬럼 가상화를 끄고, 데이터 렌더링 후 전체 컬럼 자동 크기 재적용
+        auto_size_all_js = JsCode("""
+            function(params) { params.api.autoSizeAllColumns(false); }
         """)
-        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+        gb.configure_grid_options(
+            autoSizeStrategy={'type': 'fitCellContents', 'skipHeader': False},
+            suppressColumnVirtualisation=True,
+            onFirstDataRendered=auto_size_all_js,
+            onPaginationChanged=auto_size_all_js,
+        )
 
-        column_widths = {
-            '순서': 40,
-            '종목명': 140,
-            '매입단가': 100,
-            '매입수량': 100,
-            '매입금액': 100,
-            '현재가': 100,
-            '평가금액': 100,
-            '손익률(%)': 80,
-            '손익금액': 100,
-            '비중(%)': 80
-        }
+        column_list = ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익률(%)', '손익금액', '비중(%)',
+                       '수행가', '이탈가', '최종이탈가']
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
         number_format_js = JsCode("""
@@ -166,27 +182,103 @@ else:
             }
         """)
 
-        for col, width in column_widths.items():
+        # 현금(KRW-KRW) 행은 가격 항목 편집 불가
+        price_editable_js = JsCode("""
+            function(params) { return params.data['종목명'] !== 'KRW-KRW'; }
+        """)
+
+        # 현금(KRW-KRW) 행을 제외한 종목만 매매계획 편집 가능
+        plan_editable_js = JsCode("""
+            function(params) { return params.data['매매계획'] !== ''; }
+        """)
+
+        # 종목명은 좌측 고정 (가로 스크롤 시에도 표시)
+        gb.configure_column('종목명', pinned='left')
+        gb.configure_column('매매계획', editable=plan_editable_js, cellEditor='agSelectCellEditor',
+                            cellEditorParams={'values': list(plan_values)},
+                            singleClickEdit=True, cellStyle={'backgroundColor': '#fff8e1'})
+
+        for col in column_list:
             if col in ['손익률(%)', '비중(%)']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js, width=width)
-            elif col in ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익금액']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js)
+            elif col in price_cols:
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js,
+                                    editable=price_editable_js, cellEditor='agNumberCellEditor',
+                                    cellStyle={'backgroundColor': '#fff8e1'})
             else:
-                gb.configure_column(col, width=width)
-        
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js)
+
         grid_options = gb.build()
 
-        # AgGrid를 통해 데이터 출력
-        AgGrid(
+        if 'price_apply_msg' in st.session_state:
+            st.success(st.session_state.pop('price_apply_msg'))
+
+        st.caption("매매계획은 셀을 클릭해 콤보박스에서 선택하고, 수행가·이탈가·최종이탈가는 셀을 더블클릭해 수정한 뒤 "
+                   f"[변경 적용]을 누르면 {my_choice1} 모든 계좌의 해당 종목에 반영됩니다.")
+
+        # AgGrid를 통해 데이터 출력 (가격 항목 편집값 반환)
+        grid_response = AgGrid(
             df_display,
             gridOptions=grid_options,
-            fit_columns_on_grid_load=False,  # 화면 로드시 자동 폭 맞춤
+            fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
             use_container_width=True,
             update_mode=GridUpdateMode.NO_UPDATE,
+            update_on=['cellValueChanged'],  # 셀 편집 시에만 값 반환
             enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+            excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
+            key=f"total_grid_{my_choice1}_{my_choice2}",
         )
+
+        # 편집 전/후 비교로 변경된 매매계획/가격 항목 수집
+        # (종목명, 항목, DB컬럼, 변경 전 표시값, 변경 후 표시값, DB 저장값)
+        edited_df = pd.DataFrame(grid_response['data'])
+        price_changes = []
+        if not edited_df.empty and '종목명' in edited_df.columns:
+            orig_by_prd = df_display.set_index('종목명')
+            for _, row in edited_df.iterrows():
+                prd_ = row['종목명']
+                if prd_ == 'KRW-KRW' or prd_ not in orig_by_prd.index:
+                    continue
+                old_plan, new_plan = orig_by_prd.at[prd_, '매매계획'], row['매매계획']
+                if old_plan != '' and new_plan in plan_values and new_plan != old_plan:
+                    price_changes.append((prd_, '매매계획', 'trading_plan', old_plan, new_plan, plan_values[new_plan]))
+                for label, db_col in price_cols.items():
+                    try:
+                        new_val = float(row[label])
+                    except (TypeError, ValueError):
+                        continue
+                    old_val = float(orig_by_prd.at[prd_, label])
+                    if abs(new_val - old_val) > 1e-9:
+                        price_changes.append((prd_, label, db_col, f"{old_val:,}", f"{new_val:,}", new_val))
+
+        if price_changes:
+            st.dataframe(
+                pd.DataFrame([(n, l, o, v) for n, l, _, o, v, _ in price_changes],
+                             columns=['종목명', '항목', '변경 전', '변경 후']),
+                hide_index=True,
+            )
+            if st.button(f"변경 적용 ({len(price_changes)}건, {my_choice1} 모든 계좌)", key=f"apply_price_{my_choice1}_{my_choice2}"):
+                cur_upd = conn.cursor()
+                try:
+                    applied = []
+                    for prd_, label, db_col, old_disp, new_disp, new_val in price_changes:
+                        # db_col은 price_cols / 'trading_plan' 화이트리스트 값만 사용
+                        cur_upd.execute(f"""
+                            UPDATE balance_info
+                               SET {db_col} = %s, chg_date = now()
+                             WHERE market_name = %s AND prd_nm = %s AND proc_yn = 'Y'
+                        """, (new_val, my_choice1, prd_))
+                        applied.append(f"{prd_} {label} {old_disp} → {new_disp} ({my_choice1} {cur_upd.rowcount}개 계좌)")
+                    conn.commit()
+                    st.session_state['price_apply_msg'] = "변경 완료\n\n" + "\n\n".join(applied)
+                except Exception as e:
+                    conn.rollback()
+                    st.error(f"변경 실패: {e}")
+                finally:
+                    cur_upd.close()
+                if 'price_apply_msg' in st.session_state:
+                    st.rerun()
 
         df_pie = df0[df0['평가금액'] > 0].copy()
 
