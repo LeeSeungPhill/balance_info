@@ -8,6 +8,42 @@ from st_aggrid import AgGrid, GridUpdateMode
 from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import JsCode
 
+# 편집 가능한 AG-Grid 하단 상태바의 [변경 적용] 버튼.
+# 셀 편집만으로는 Streamlit 재실행이 일어나지 않도록 update_on=['filterChanged'] 만 사용하고,
+# 버튼 클릭 시 편집 확정 + 숨김 컬럼(_apply_nonce)에 클릭 시각 기록 + filterChanged 발생으로 한 번만 데이터를 반환한다.
+APPLY_EDITS_PANEL_JS = JsCode("""
+class ApplyEditsPanel {
+    init(params) {
+        this.eGui = document.createElement('div');
+        this.eGui.style.padding = '4px 0';
+        const btn = document.createElement('button');
+        btn.innerText = '변경 적용';
+        btn.style.cssText = 'padding:4px 14px;background:#ff4b4b;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;';
+        btn.addEventListener('click', () => {
+            const api = params.api;
+            api.stopEditing();
+            let first = null;
+            api.forEachNode(n => { if (!first) { first = n; } });
+            if (first) { first.setDataValue('_apply_nonce', Date.now()); }
+            api.onFilterChanged();
+        });
+        this.eGui.appendChild(btn);
+    }
+    getGui() { return this.eGui; }
+}
+""")
+
+
+def is_new_apply_request(edited_df, state_key):
+    """그리드의 [변경 적용] 버튼 클릭으로 들어온, 아직 처리하지 않은 요청인지 판단 (클릭 시각 nonce 비교)"""
+    if edited_df.empty or '_apply_nonce' not in edited_df.columns:
+        return False
+    nonce = int(pd.to_numeric(edited_df['_apply_nonce'], errors='coerce').fillna(0).max())
+    if nonce <= 0 or st.session_state.get(state_key) == nonce:
+        return False
+    st.session_state[state_key] = nonce
+    return True
+
 # PostgreSQL 연결 설정
 # conn_string = "dbname='universe' host='localhost' port='5432' user='postgres' password='asdf1234'"
 conn_string = "dbname='universe' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
@@ -138,9 +174,12 @@ else:
 
         # 종목명, 매매계획을 맨 앞 항목으로 배치
         df_display = df_display[['종목명', '매매계획'] + [c for c in df_display.columns if c not in ('종목명', '매매계획')]]
+        df_display['_apply_nonce'] = 0
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
+        gb.configure_column('_apply_nonce', hide=True)
+        gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': APPLY_EDITS_PANEL_JS, 'align': 'left'}]})
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationAutoPageSize=False, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
@@ -214,9 +253,9 @@ else:
             st.success(st.session_state.pop('price_apply_msg'))
 
         st.caption("매매계획은 셀을 클릭해 콤보박스에서 선택하고, 수행가·이탈가·최종이탈가는 셀을 더블클릭해 수정한 뒤 "
-                   f"[변경 적용]을 누르면 {my_choice1} 모든 계좌의 해당 종목에 반영됩니다.")
+                   f"그리드 하단 [변경 적용]을 누르면 {my_choice1} 모든 계좌의 해당 종목에 한 번에 반영됩니다.")
 
-        # AgGrid를 통해 데이터 출력 (가격 항목 편집값 반환)
+        # AgGrid를 통해 데이터 출력 (그리드 하단 [변경 적용] 버튼 클릭 시에만 편집값 반환)
         grid_response = AgGrid(
             df_display,
             gridOptions=grid_options,
@@ -224,17 +263,18 @@ else:
             allow_unsafe_jscode=True,
             use_container_width=True,
             update_mode=GridUpdateMode.NO_UPDATE,
-            update_on=['cellValueChanged'],  # 셀 편집 시에만 값 반환
-            enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+            update_on=['filterChanged'],     # [변경 적용] 버튼이 발생시키는 이벤트에서만 값 반환
+            enable_enterprise_modules=True,  # 엑셀 다운로드, 상태바 버튼 위해 필요
             excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
             key=f"total_grid_{my_choice1}_{my_choice2}",
         )
 
-        # 편집 전/후 비교로 변경된 매매계획/가격 항목 수집
+        # [변경 적용] 클릭으로 들어온 새 요청일 때만 편집 전/후 비교로 변경된 매매계획/가격 항목 수집
         # (종목명, 항목, DB컬럼, 변경 전 표시값, 변경 후 표시값, DB 저장값)
         edited_df = pd.DataFrame(grid_response['data'])
         price_changes = []
-        if not edited_df.empty and '종목명' in edited_df.columns:
+        apply_requested = is_new_apply_request(edited_df, f"apply_nonce_{my_choice1}_{my_choice2}")
+        if apply_requested and '종목명' in edited_df.columns:
             orig_by_prd = df_display.set_index('종목명')
             for _, row in edited_df.iterrows():
                 prd_ = row['종목명']
@@ -252,33 +292,29 @@ else:
                     if abs(new_val - old_val) > 1e-9:
                         price_changes.append((prd_, label, db_col, f"{old_val:,}", f"{new_val:,}", new_val))
 
-        if price_changes:
-            st.dataframe(
-                pd.DataFrame([(n, l, o, v) for n, l, _, o, v, _ in price_changes],
-                             columns=['종목명', '항목', '변경 전', '변경 후']),
-                hide_index=True,
-            )
-            if st.button(f"변경 적용 ({len(price_changes)}건, {my_choice1} 모든 계좌)", key=f"apply_price_{my_choice1}_{my_choice2}"):
-                cur_upd = conn.cursor()
-                try:
-                    applied = []
-                    for prd_, label, db_col, old_disp, new_disp, new_val in price_changes:
-                        # db_col은 price_cols / 'trading_plan' 화이트리스트 값만 사용
-                        cur_upd.execute(f"""
-                            UPDATE balance_info
-                               SET {db_col} = %s, chg_date = now()
-                             WHERE market_name = %s AND prd_nm = %s AND proc_yn = 'Y'
-                        """, (new_val, my_choice1, prd_))
-                        applied.append(f"{prd_} {label} {old_disp} → {new_disp} ({my_choice1} {cur_upd.rowcount}개 계좌)")
-                    conn.commit()
-                    st.session_state['price_apply_msg'] = "변경 완료\n\n" + "\n\n".join(applied)
-                except Exception as e:
-                    conn.rollback()
-                    st.error(f"변경 실패: {e}")
-                finally:
-                    cur_upd.close()
-                if 'price_apply_msg' in st.session_state:
-                    st.rerun()
+        if apply_requested and not price_changes:
+            st.info("변경된 항목이 없습니다.")
+        elif price_changes:
+            cur_upd = conn.cursor()
+            try:
+                applied = []
+                for prd_, label, db_col, old_disp, new_disp, new_val in price_changes:
+                    # db_col은 price_cols / 'trading_plan' 화이트리스트 값만 사용
+                    cur_upd.execute(f"""
+                        UPDATE balance_info
+                           SET {db_col} = %s, chg_date = now()
+                         WHERE market_name = %s AND prd_nm = %s AND proc_yn = 'Y'
+                    """, (new_val, my_choice1, prd_))
+                    applied.append(f"{prd_} {label} {old_disp} → {new_disp} ({my_choice1} {cur_upd.rowcount}개 계좌)")
+                conn.commit()
+                st.session_state['price_apply_msg'] = "변경 완료\n\n" + "\n\n".join(applied)
+            except Exception as e:
+                conn.rollback()
+                st.error(f"변경 실패: {e}")
+            finally:
+                cur_upd.close()
+            if 'price_apply_msg' in st.session_state:
+                st.rerun()
 
         df_pie = df0[df0['평가금액'] > 0].copy()
 
