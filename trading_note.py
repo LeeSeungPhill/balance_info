@@ -5,12 +5,121 @@ import streamlit as st
 from st_aggrid import AgGrid, GridUpdateMode
 from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import JsCode
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # PostgreSQL 연결 설정
 conn_string = "dbname='fund_risk_mng' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
-# conn_string = "dbname='fund_risk_mng' host='localhost' port='5432' user='postgres' password='sktl2389!1'"
+
 # DB 연결
 conn = db.connect(conn_string)
+
+# 편집 가능한 AG-Grid 하단 상태바의 [변경 적용] 버튼.
+# 셀 편집만으로는 Streamlit 재실행이 일어나지 않도록 update_on=['filterChanged'] 만 사용하고,
+# 버튼 클릭 시 편집 확정 + 숨김 컬럼(_apply_nonce)에 클릭 시각 기록 + filterChanged 발생으로 한 번만 데이터를 반환한다.
+APPLY_EDITS_PANEL_JS = JsCode("""
+class ApplyEditsPanel {
+    init(params) {
+        this.eGui = document.createElement('div');
+        this.eGui.style.padding = '4px 0';
+        const btn = document.createElement('button');
+        btn.innerText = '변경 적용';
+        btn.style.cssText = 'padding:4px 14px;background:#ff4b4b;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;';
+        btn.addEventListener('click', () => {
+            const api = params.api;
+            api.stopEditing();
+            let first = null;
+            api.forEachNode(n => { if (!first) { first = n; } });
+            if (first) { first.setDataValue('_apply_nonce', Date.now()); }
+            api.onFilterChanged();
+        });
+        this.eGui.appendChild(btn);
+    }
+    getGui() { return this.eGui; }
+}
+""")
+
+
+def is_new_apply_request(edited_df, state_key):
+    """그리드의 [변경 적용] 버튼 클릭으로 들어온, 아직 처리하지 않은 요청인지 판단 (클릭 시각 nonce 비교)"""
+    if edited_df.empty or '_apply_nonce' not in edited_df.columns:
+        return False
+    nonce = int(pd.to_numeric(edited_df['_apply_nonce'], errors='coerce').fillna(0).max())
+    if nonce <= 0 or st.session_state.get(state_key) == nonce:
+        return False
+    st.session_state[state_key] = nonce
+    return True
+
+
+# 종목코드/종목명 셀 클릭 시 차트 팝업 요청.
+# 클릭한 행의 숨김 컬럼(_chart_click)에 클릭 시각 기록 + filterChanged 발생으로 그리드 데이터를 반환한다.
+CHART_CLICK_JS = JsCode("""
+function(e) {
+    e.node.setDataValue('_chart_click', Date.now());
+    e.api.onFilterChanged();
+}
+""")
+CHART_LINK_STYLE = {'color': '#4361ee', 'cursor': 'pointer', 'textDecoration': 'underline'}
+
+
+def new_chart_click(grid_df, state_key, code_col, name_col):
+    """그리드에서 아직 처리하지 않은 차트 클릭이 있으면 (종목코드, 종목명) 반환 (클릭 시각 nonce 비교)"""
+    if grid_df.empty or '_chart_click' not in grid_df.columns:
+        return None
+    clicks = pd.to_numeric(grid_df['_chart_click'], errors='coerce').fillna(0)
+    nonce = int(clicks.max())
+    if nonce <= 0 or st.session_state.get(state_key) == nonce:
+        return None
+    st.session_state[state_key] = nonce
+    row = grid_df.loc[clicks.idxmax()]
+    return row[code_col], row[name_col]
+
+
+# 종목 일봉 OHLCV (C:\project\simul\simul_server.py 의 /api/stock-chart 와 같은 500일 조회, 5분 캐시)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_ohlcv(code):
+    from pykrx import stock  # 무거운 의존성은 차트 조회 시점에만 로드
+
+    end = datetime.now()
+    start = end - timedelta(days=500)
+    df = stock.get_market_ohlcv_by_date(start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'), code)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    return df[['시가', '고가', '저가', '종가', '거래량']]
+
+
+# 종목 차트 팝업: 일봉 캔들(상승=빨강/하락=파랑) + 거래량 막대(전일 대비 증가=빨강/감소=파랑)
+@st.dialog("종목 차트", width="large")
+def show_stock_chart(code, name):
+    st.subheader(f"📈 {name} [{code}]")
+    if not code or not str(code).isdigit() or len(str(code)) != 6:
+        st.error("유효한 종목코드가 없어 차트를 표시할 수 없습니다.")
+        return
+
+    with st.spinner("차트 불러오는 중..."):
+        try:
+            df = load_ohlcv(code)
+        except Exception as e:
+            st.error(f"차트 데이터 조회 오류: {e}")
+            return
+    if df.empty:
+        st.error(f"차트 데이터가 없습니다({code})")
+        return
+
+    x = df.index.strftime('%Y-%m-%d')
+    vol_colors = ['red' if d >= 0 else 'blue' for d in df['거래량'].diff().fillna(0)]
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+    fig.add_trace(go.Candlestick(x=x, open=df['시가'], high=df['고가'], low=df['저가'], close=df['종가'],
+                                 increasing_line_color='red', increasing_fillcolor='red',
+                                 decreasing_line_color='blue', decreasing_fillcolor='blue',
+                                 name='일봉'), row=1, col=1)
+    fig.add_trace(go.Bar(x=x, y=df['거래량'], marker_color=vol_colors, name='거래량'), row=2, col=1)
+    # 휴장일 공백 없이 거래일만 표시
+    fig.update_xaxes(type='category', nticks=20, tickangle=-90)
+    fig.update_layout(height=650, showlegend=False, xaxis_rangeslider_visible=False,
+                      margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
 
 # 계좌번호 조회
 def account(nickname):
@@ -135,6 +244,155 @@ def save_note(record):
 def to_int(value):
     return 0 if value is None or pd.isna(value) else int(value)
 
+# 관심종목 조회/변경 (가격 변경·삭제는 모든 계좌의 해당 종목에 반영)
+st.header("관심종목")
+
+# 화면 항목명 → DB 컬럼 (UPDATE 시 컬럼명 화이트리스트로도 사용)
+interest_price_cols = {
+    '1차저항가': 'through_price',
+    '1차지지가': 'leave_price',
+    '2차저항가': 'resist_price',
+    '2차지지가': 'support_price',
+    '추세상한가': 'trend_high_price',
+    '추세하한가': 'trend_low_price',
+}
+
+cur07 = conn.cursor()
+# 계좌 구분 없이 종목코드별 1건 (계좌별 값이 다르면 가장 최근 변경된 행 기준)
+cur07.execute(f"""
+    SELECT DISTINCT ON (code) code, name, {', '.join(interest_price_cols.values())}
+    FROM public."interestItem_interest_item"
+    WHERE code NOT IN ('0001', '1001') AND proc_yn = 'Y'
+    ORDER BY code, last_chg_date DESC NULLS LAST
+""")
+df_interest = pd.DataFrame(cur07.fetchall(), columns=['코드', '종목명'] + list(interest_price_cols))
+cur07.close()
+
+if 'interest_apply_msg' in st.session_state:
+    st.success(st.session_state.pop('interest_apply_msg'))
+
+if df_interest.empty:
+    st.info("관심종목이 없습니다.")
+else:
+    for col in interest_price_cols:
+        df_interest[col] = pd.to_numeric(df_interest[col], errors='coerce').fillna(0).astype(int)
+    df_interest['삭제'] = False
+    df_interest['_apply_nonce'] = 0.0
+    df_interest['_chart_click'] = 0.0
+
+    gb = GridOptionsBuilder.from_dataframe(df_interest)
+    gb.configure_column('_apply_nonce', hide=True)
+    gb.configure_column('_chart_click', hide=True)
+    gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': APPLY_EDITS_PANEL_JS, 'align': 'left'}]})
+    gb.configure_pagination(enabled=True, paginationPageSize=20)
+
+    # 컬럼 폭을 데이터 크기에 맞춤 (첫 렌더링/페이지 이동 시)
+    autosize_js = JsCode("""
+        function(params) {
+            params.api.autoSizeAllColumns(false);
+        }
+    """)
+    gb.configure_grid_options(domLayout='normal', onFirstDataRendered=autosize_js, onPaginationChanged=autosize_js)
+
+    # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
+    number_format_js = JsCode("""
+        function(params) {
+            if (params.value === null || params.value === undefined) {
+                return '';
+            }
+            return params.value.toLocaleString();
+        }
+    """)
+
+    # 종목코드/종목명 클릭 시 차트 팝업
+    gb.configure_column('코드', pinned='left', onCellClicked=CHART_CLICK_JS, cellStyle=CHART_LINK_STYLE)
+    gb.configure_column('종목명', pinned='left', onCellClicked=CHART_CLICK_JS, cellStyle=CHART_LINK_STYLE)
+    for col in interest_price_cols:
+        gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js,
+                            editable=True, cellEditor='agNumberCellEditor',
+                            cellStyle={'backgroundColor': '#fff8e1'})
+    gb.configure_column('삭제', cellDataType='boolean', editable=True,
+                        cellRenderer='agCheckboxCellRenderer', cellEditor='agCheckboxCellEditor')
+
+    grid_options = gb.build()
+
+    st.caption("가격 항목은 셀을 더블클릭해 수정하고, 삭제할 종목은 [삭제]를 체크한 뒤 "
+               "그리드 하단 [변경 적용]을 누르면 모든 계좌의 해당 종목에 한 번에 반영됩니다. "
+               "코드/종목명을 클릭하면 차트가 표시됩니다.")
+
+    # AgGrid를 통해 데이터 출력 (그리드 하단 [변경 적용] 버튼 클릭 시에만 편집값 반환)
+    grid_response = AgGrid(
+        df_interest,
+        gridOptions=grid_options,
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True,
+        use_container_width=True,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        update_on=['filterChanged'],     # [변경 적용] 버튼/차트 클릭이 발생시키는 이벤트에서만 값 반환
+        enable_enterprise_modules=True,  # 상태바 버튼 위해 필요
+        key="interest_grid",
+    )
+
+    edited_df = pd.DataFrame(grid_response['data'])
+
+    # 코드/종목명 클릭으로 들어온 새 요청이면 차트 팝업
+    chart_target = new_chart_click(edited_df, "interest_chart_nonce", '코드', '종목명')
+    if chart_target:
+        show_stock_chart(*chart_target)
+
+    # [변경 적용] 클릭으로 들어온 새 요청일 때만 편집 전/후 비교로 변경 항목 수집
+    apply_requested = is_new_apply_request(edited_df, "interest_apply_nonce")
+    price_changes = []   # (코드, 종목명, 항목, DB컬럼, 변경 전, 변경 후)
+    deletes = []         # (코드, 종목명)
+    if apply_requested and '코드' in edited_df.columns:
+        orig_by_code = df_interest.set_index('코드')
+        for _, row in edited_df.iterrows():
+            code_ = row['코드']
+            if code_ not in orig_by_code.index:
+                continue
+            if row.get('삭제') in (True, 'true', 'True'):
+                deletes.append((code_, row['종목명']))
+                continue
+            for label, db_col in interest_price_cols.items():
+                try:
+                    new_val = int(float(row[label]))
+                except (TypeError, ValueError):
+                    continue
+                old_val = int(orig_by_code.at[code_, label])
+                if new_val != old_val:
+                    price_changes.append((code_, row['종목명'], label, db_col, old_val, new_val))
+
+    if apply_requested and not price_changes and not deletes:
+        st.info("변경된 항목이 없습니다.")
+    elif price_changes or deletes:
+        cur_upd = conn.cursor()
+        try:
+            applied = []
+            for code_, name_, label, db_col, old_val, new_val in price_changes:
+                # db_col은 interest_price_cols 화이트리스트 값만 사용
+                cur_upd.execute(f"""
+                    UPDATE public."interestItem_interest_item"
+                       SET {db_col} = %s, last_chg_date = now()
+                     WHERE code = %s AND proc_yn = 'Y'
+                """, (new_val, code_))
+                applied.append(f"{name_} {label} {old_val:,} → {new_val:,} ({cur_upd.rowcount}개 계좌)")
+            for code_, name_ in deletes:
+                cur_upd.execute("""
+                    UPDATE public."interestItem_interest_item"
+                       SET proc_yn = 'N', last_chg_date = now()
+                     WHERE code = %s AND proc_yn = 'Y'
+                """, (code_,))
+                applied.append(f"{name_} 삭제 ({cur_upd.rowcount}개 계좌)")
+            conn.commit()
+            st.session_state['interest_apply_msg'] = "변경 완료\n\n" + "\n\n".join(applied)
+        except Exception as e:
+            conn.rollback()
+            st.error(f"변경 실패: {e}")
+        finally:
+            cur_upd.close()
+        if 'interest_apply_msg' in st.session_state:
+            st.rerun()
+
 
 nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
 
@@ -225,14 +483,14 @@ end_date = c2.date_input("조회종료일", datetime.now())
 
 cur05 = conn.cursor()
 cur05.execute("""
-    SELECT note_dt, name, buy_price, buy_qty, sell_price, sell_qty,
+    SELECT note_dt, code, name, buy_price, buy_qty, sell_price, sell_qty,
            buy_reason, sell_reason, CASE principle_yn WHEN 'Y' THEN '준수' WHEN 'N' THEN '미준수' ELSE '' END,
            good_point, improve_point
     FROM public.trading_note
     WHERE acct_no = %s AND note_dt BETWEEN %s AND %s
     ORDER BY note_dt DESC, name
 """, (acct_no, strt_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")))
-df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목명', '매수가', '매수량', '매도가', '매도량',
+df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목코드', '종목명', '매수가', '매수량', '매도가', '매도량',
                                                    '매수근거', '매도근거', '매매원칙 준수여부', '잘한점', '개선할 점'])
 cur05.close()
 
@@ -241,8 +499,11 @@ if df_notes.empty:
 else:
     for col in ['매수가', '매도가']:
         df_notes[col] = pd.to_numeric(df_notes[col], errors='coerce')
+    df_notes['_chart_click'] = 0.0
 
     gb = GridOptionsBuilder.from_dataframe(df_notes)
+    gb.configure_column('종목코드', hide=True)   # 차트 조회용
+    gb.configure_column('_chart_click', hide=True)
     gb.configure_pagination(enabled=True, paginationPageSize=20)
     # 컬럼 폭을 데이터 크기에 맞춤 (첫 렌더링/페이지 이동 시)
     autosize_js = JsCode("""
@@ -263,7 +524,8 @@ else:
     """)
 
     gb.configure_column('작성일자', pinned='left')
-    gb.configure_column('종목명', pinned='left')
+    # 종목명 클릭 시 차트 팝업
+    gb.configure_column('종목명', pinned='left', onCellClicked=CHART_CLICK_JS, cellStyle=CHART_LINK_STYLE)
     for col in ['매수가', '매수량', '매도가', '매도량']:
         gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js)
     # 긴 텍스트는 최대 폭까지만 늘리고 줄바꿈
@@ -272,13 +534,20 @@ else:
 
     grid_options = gb.build()
 
-    AgGrid(
+    notes_response = AgGrid(
         df_notes,
         gridOptions=grid_options,
         fit_columns_on_grid_load=False,
         allow_unsafe_jscode=True,
         use_container_width=True,
         update_mode=GridUpdateMode.NO_UPDATE,
+        update_on=['filterChanged'],     # 종목명 클릭(차트 팝업) 시 값 반환
         enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-        excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+        excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
+        key=f"notes_grid_{acct_no}",
     )
+
+    # 종목명 클릭으로 들어온 새 요청이면 차트 팝업
+    chart_target = new_chart_click(pd.DataFrame(notes_response['data']), f"notes_chart_nonce_{acct_no}", '종목코드', '종목명')
+    if chart_target:
+        show_stock_chart(*chart_target)
