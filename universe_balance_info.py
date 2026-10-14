@@ -201,7 +201,7 @@ else:
 
         # 종목명, 매매계획을 맨 앞 항목으로 배치
         df_display = df_display[['종목명', '매매계획'] + [c for c in df_display.columns if c not in ('종목명', '매매계획')]]
-        df_display['_apply_nonce'] = 0
+        df_display['_apply_nonce'] = 0.0
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -2137,7 +2137,7 @@ else:
         cur_price.close()
 
         for i, label in enumerate(price_cols):
-            df0[label] = df0['코드'].map(lambda c: int(price_map[c][i] or 0) if c in price_map else 0)
+            df0[label] = df0['코드'].map(lambda c: int(price_map[c][i] or 0) if c in price_map else 0.0)
 
         # 매매계획 (trading_plan): 일반=NULL, 투자='i', 홀딩='h'
         # 트레이딩풀(stockBalance_stock_balance)에 없는 종목/현금은 '' 로 표시하고 편집 불가
@@ -2151,7 +2151,7 @@ else:
             df0[df0['코드'] != ''].sort_values(by='코드'),
             df0[df0['코드'] == ''],
         ]).reset_index(drop=True)
-        df_display['_apply_nonce'] = 0
+        df_display['_apply_nonce'] = 0.0
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)

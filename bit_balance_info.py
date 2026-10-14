@@ -174,7 +174,7 @@ else:
 
         # 종목명, 매매계획을 맨 앞 항목으로 배치
         df_display = df_display[['종목명', '매매계획'] + [c for c in df_display.columns if c not in ('종목명', '매매계획')]]
-        df_display['_apply_nonce'] = 0
+        df_display['_apply_nonce'] = 0.0
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
