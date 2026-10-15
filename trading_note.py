@@ -133,11 +133,11 @@ def account(nickname):
 
 
 # 매매노트 대상 종목 조회 (전영업일 체결 + 관심종목 + 트레이딩풀 보유종목, 종목코드 기준 조합)
-def note_targets(acct_no):
+def note_targets(acct_no, note_dt):
 
     cur02 = conn.cursor()
 
-    # 전영업일 체결 종목 (체결 테이블에 code 가 없으므로 종목명으로 관심종목/트레이딩풀/트레이딩트레일에서 코드 조회)
+    # 작성일자 체결 종목 (체결 테이블에 code 가 없으므로 종목명으로 관심종목/트레이딩풀/일별잔고/트레이딩트레일에서 코드 조회)
     cur02.execute("""
         WITH oc AS (
             SELECT A.name,
@@ -146,8 +146,8 @@ def note_targets(acct_no):
                 SUM(CASE WHEN A.order_type LIKE '%%매도%%' THEN A.order_price::numeric * A.total_complete_qty::int END) AS sell_amt,
                 SUM(CASE WHEN A.order_type LIKE '%%매도%%' THEN A.total_complete_qty::int END)                          AS sell_qty
             FROM public."stockOrderComplete_stock_order_complete" A
-            WHERE A.acct_no = %s
-              AND A.order_dt = prev_business_day_char(CURRENT_DATE)
+            WHERE A.acct_no = %(acct_no)s
+              AND A.order_dt = %(note_dt)s
               AND A.total_complete_qty::int > 0
               AND (A.order_type LIKE '%%매수%%' OR A.order_type LIKE '%%매도%%')
             GROUP BY A.name
@@ -155,7 +155,7 @@ def note_targets(acct_no):
         SELECT COALESCE(
                    (SELECT I.code FROM public."interestItem_interest_item" I WHERE I.name = oc.name ORDER BY I.last_chg_date DESC LIMIT 1),
                    (SELECT B.code FROM public."stockBalance_stock_balance" B WHERE B.name = oc.name ORDER BY B.last_chg_date DESC LIMIT 1),
-                   (SELECT T.code FROM public.trading_trail T WHERE T.name = oc.name ORDER BY T.crt_dt DESC LIMIT 1),
+                   (SELECT D.code FROM public.dly_stock_balance D WHERE D.name = oc.name AND D.dt = %(note_dt)s LIMIT 1),
                    '') AS code,
                oc.name,
                ROUND(oc.buy_amt / NULLIF(oc.buy_qty, 0))   AS buy_price,
@@ -163,7 +163,7 @@ def note_targets(acct_no):
                ROUND(oc.sell_amt / NULLIF(oc.sell_qty, 0)) AS sell_price,
                oc.sell_qty
         FROM oc
-    """, (acct_no,))
+    """, {'acct_no': acct_no, 'note_dt': note_dt})
     df_complete = pd.DataFrame(cur02.fetchall(), columns=['code', 'name', 'buy_price', 'buy_qty', 'sell_price', 'sell_qty'])
     df_complete['구분'] = '체결'
 
@@ -176,11 +176,19 @@ def note_targets(acct_no):
     df_interest['구분'] = '관심'
 
     # 트레이딩풀 보유종목 (체결이 없으면 매입단가/매입수량을 매수가/매수량 기본값으로 사용)
-    cur02.execute("""
-        SELECT code, name, ROUND(purchase_price) AS buy_price, purchase_amount AS buy_qty
-        FROM public."stockBalance_stock_balance"
-        WHERE acct_no = %s AND proc_yn = 'Y'
-    """, (acct_no,))
+    # 작성일자가 오늘이면 현재 트레이딩풀, 과거 일자면 해당 일자의 일별잔고(dly_stock_balance) 기준
+    if note_dt == datetime.now().strftime("%Y%m%d"):
+        cur02.execute("""
+            SELECT code, name, ROUND(purchase_price) AS buy_price, purchase_amount AS buy_qty
+            FROM public."stockBalance_stock_balance"
+            WHERE acct_no = %s AND proc_yn = 'Y'
+        """, (acct_no,))
+    else:
+        cur02.execute("""
+            SELECT code, name, purchase_price AS buy_price, purchase_qty AS buy_qty
+            FROM public.dly_stock_balance
+            WHERE acct = %s AND dt = %s
+        """, (str(acct_no), note_dt))
     df_balance = pd.DataFrame(cur02.fetchall(), columns=['code', 'name', 'buy_price', 'buy_qty'])
     df_balance['구분'] = '보유'
     cur02.close()
@@ -423,12 +431,20 @@ note_dt = st.selectbox(
     format_func=lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]} ({weekday_names[datetime.strptime(d, '%Y%m%d').weekday()]})"
 )
 
-df_targets = note_targets(acct_no)
+df_targets = note_targets(acct_no, note_dt)
 
 if df_targets.empty:
     st.info("매매노트 작성 대상 종목이 없습니다.")
 else:
-    labels = [f"{r.name} ({r.code}) [{r.구분}]" if r.code else f"{r.name} [{r.구분}]" for r in df_targets.itertuples()]
+    # 작성일자에 이미 매매노트가 작성된 종목은 레이블 끝에 [노트] 표시
+    cur08 = conn.cursor()
+    cur08.execute("SELECT code, name FROM public.trading_note WHERE acct_no = %s AND note_dt = %s", (acct_no, note_dt))
+    noted = set(cur08.fetchall())
+    cur08.close()
+
+    labels = [(f"{r.name} ({r.code}) [{r.구분}]" if r.code else f"{r.name} [{r.구분}]")
+              + (" [노트]" if (r.code, r.name) in noted else "")
+              for r in df_targets.itertuples()]
     selected_idx = st.selectbox("종목명을 선택하세요", range(len(labels)), format_func=lambda i: labels[i])
     target = df_targets.iloc[selected_idx]
     code, name = target['code'], target['name']
@@ -472,7 +488,12 @@ else:
             'good_point': good_point, 'improve_point': improve_point,
         }
         if save_note(record):
-            st.success(f"{name} 매매노트가 저장되었습니다.")
+            # 종목 레이블의 [노트] 표시가 바로 반영되도록 재실행 (저장 메시지는 재실행 후 표시)
+            st.session_state['note_save_msg'] = f"{name} 매매노트가 저장되었습니다."
+            st.rerun()
+
+    if 'note_save_msg' in st.session_state:
+        st.success(st.session_state.pop('note_save_msg'))
 
 # 매매노트 조회
 st.header("매매노트 조회")
@@ -485,13 +506,13 @@ cur05 = conn.cursor()
 cur05.execute("""
     SELECT note_dt, code, name, buy_price, buy_qty, sell_price, sell_qty,
            buy_reason, sell_reason, CASE principle_yn WHEN 'Y' THEN '준수' WHEN 'N' THEN '미준수' ELSE '' END,
-           good_point, improve_point
-    FROM public.trading_note
-    WHERE acct_no = %s AND note_dt BETWEEN %s AND %s
+           good_point, improve_point, (SELECT nick_name FROM public."stockAccount_stock_account" WHERE acct_no = A.acct_no) AS nick_name
+    FROM public.trading_note A
+    WHERE note_dt BETWEEN %s AND %s
     ORDER BY note_dt DESC, name
-""", (acct_no, strt_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")))
+""", (strt_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")))
 df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목코드', '종목명', '매수가', '매수량', '매도가', '매도량',
-                                                   '매수근거', '매도근거', '매매원칙 준수여부', '잘한점', '개선할 점'])
+                                                   '매수근거', '매도근거', '매매원칙 준수여부', '잘한점', '개선할 점', '닉네임'])
 cur05.close()
 
 if df_notes.empty:
