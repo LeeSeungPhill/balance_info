@@ -2129,7 +2129,8 @@ else:
         }
         cur_price = kis_conn.cursor()
         cur_price.execute("""
-            SELECT code, sign_resist_price, sign_support_price, end_target_price, end_loss_price, trading_plan
+            SELECT code, sign_resist_price, sign_support_price, end_target_price, end_loss_price, trading_plan,
+                   ((sign_support_price - purchase_price) * purchase_amount)::int AS support_pnl
               FROM "stockBalance_stock_balance"
              WHERE acct_no = %s AND proc_yn = 'Y'
         """, (str(acct_no),))
@@ -2138,6 +2139,9 @@ else:
 
         for i, label in enumerate(price_cols):
             df0[label] = df0['코드'].map(lambda c: int(price_map[c][i] or 0) if c in price_map else 0.0)
+
+        # 지지가손익금액: 지지가 도달 시 종목별 손익 ((지지가 - 매입단가) * 매입수량, 트레이딩풀 기준, 조회용)
+        df0['지지가손익금액'] = df0['코드'].map(lambda c: int(price_map[c][5] or 0) if c in price_map else 0.0)
 
         # 매매계획 (trading_plan): 일반=NULL, 투자='i', 홀딩='h'
         # 트레이딩풀(stockBalance_stock_balance)에 없는 종목/현금은 '' 로 표시하고 편집 불가
@@ -2177,7 +2181,7 @@ else:
         )
 
         column_list = ['매입단가', '매입수량', '매입금액', '현재가', '평가금액', '손익률(%)', '손익금액', '비중(%)',
-                       '저항가', '지지가', '최종목표가', '최종이탈가']
+                       '저항가', '지지가', '최종목표가', '최종이탈가', '지지가손익금액']
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
         number_format_js = JsCode("""
@@ -2195,6 +2199,15 @@ else:
                     return '';
                 }
                 return params.value.toFixed(2) + '%';
+            }
+        """)
+
+        # 손익 부호에 따라 색상 적용
+        pnl_style_js = JsCode("""
+            function(params) {
+                if (params.value > 0) { return {'color': 'red'}; }
+                if (params.value < 0) { return {'color': 'blue'}; }
+                return {};
             }
         """)
 
@@ -2219,6 +2232,8 @@ else:
         for col in column_list:
             if col in ['손익률(%)', '비중(%)']:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=percent_format_js)
+            elif col == '지지가손익금액':
+                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, cellStyle=pnl_style_js)
             elif col in price_cols:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js,
                                     editable=price_editable_js, cellEditor='agNumberCellEditor',
@@ -2878,6 +2893,160 @@ else:
         update_mode=GridUpdateMode.NO_UPDATE,
         enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
         excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+    )
+
+# 첫 매도 손익 조회 (조회 창 안에서 최초 매수로 시작된 포지션의 진입 후 첫 번째 매도 체결 기준, 전량청산 여부 무관)
+# 수익/손실은 첫 매도 체결가와 그 시점 평균단가(hold_price) 비교, 수수료·세금 미반영
+first_sell_pnl = """
+    with recursive fills as (
+        select name, order_dt, order_tmd, order_type,
+            order_price::numeric as price, total_complete_qty::numeric as qty, hold_price::numeric as hold_price,
+            case when order_type like '%%매수%%' then 1 else -1 end as side,
+            row_number() over (partition by name order by order_dt, order_tmd, id) as rn
+        from public."stockOrderComplete_stock_order_complete"
+        where acct_no = %s and order_dt >= %s
+        and total_complete_qty::numeric > 0
+        and order_type not like '%%취소%%' and order_type not like '%%거부%%'
+    ),
+    walk as (   -- 보유수량 누적(음수는 0으로 클램프), 직전 보유 0이면 새 포지션 번호
+        select f.*, greatest(f.side * f.qty, 0) as cum_qty, 1 as pos_no, 0::numeric as prev_qty
+        from fills f where f.rn = 1
+        union all
+        select f.*, greatest(w.cum_qty + f.side * f.qty, 0),
+            case when w.cum_qty = 0 then w.pos_no + 1 else w.pos_no end, w.cum_qty
+        from walk w join fills f on f.name = w.name and f.rn = w.rn + 1
+    ),
+    pos_entry as (
+        select name, pos_no, min(order_dt) as entry_dt
+        from walk
+        group by name, pos_no
+        having bool_or(side = 1 and prev_qty = 0)
+    ),
+    first_sell as (
+        select distinct on (w.name, w.pos_no)
+            w.name, p.entry_dt, w.order_dt as sell_dt,
+            w.hold_price, w.price as sell_price, w.qty,
+            w.qty * (w.price - w.hold_price) as pnl,
+            (w.price - w.hold_price) / nullif(w.hold_price, 0) as pnl_rate,
+            w.prev_qty * w.hold_price as buy_amt   -- 첫 매도 직전 보유분의 매수금액(투입자금)
+        from walk w
+        join pos_entry p on p.name = w.name and p.pos_no = w.pos_no
+        where w.side = -1
+        order by w.name, w.pos_no, w.rn
+    )
+    select name, entry_dt, sell_dt, hold_price, sell_price, qty, pnl, pnl_rate, buy_amt
+    from first_sell
+    where sell_dt >= %s and sell_dt <= %s
+    order by sell_dt, name
+"""
+
+cur07 = kis_conn.cursor()
+cur07.execute(first_sell_pnl, (str(acct_no), hist_strt_dt, strt_dt, end_dt))
+result_seven = cur07.fetchall()
+cur07.close()
+
+df07 = pd.DataFrame([{
+    '종목명':     item[0],
+    '진입일':     item[1],
+    '첫매도일':   item[2],
+    '평균단가':   round(float(item[3])) if item[3] is not None else 0,
+    '매도가':     round(float(item[4])) if item[4] is not None else 0,
+    '매도수량':   int(item[5]) if item[5] is not None else 0,
+    '매수금액':   float(item[8]) if item[8] is not None else 0.0,
+    '실현손익':   int(item[6]) if item[6] is not None else 0,
+    '수익률(%)':  round(float(item[7]) * 100, 2) if item[7] is not None else 0.0,
+} for item in result_seven])
+
+if df07.empty:
+    st.warning("첫 매도 손익 조회된 데이터가 없습니다. 조건을 확인해주세요.")
+else:
+    st.subheader("📉 첫 매도 손익 조회")
+
+    # 보유일 / 보유종목수 / 투입자금 집계 (진입일~첫매도일, 영업일 기준, 공휴일 미반영)
+    fs_entry_ts = pd.to_datetime(df07['진입일'], format='%Y%m%d')
+    fs_exit_ts = pd.to_datetime(df07['첫매도일'], format='%Y%m%d')
+    fs_hold_days = pd.Series([len(pd.bdate_range(s, e)) for s, e in zip(fs_entry_ts, fs_exit_ts)])
+
+    fs_span_strt = max(fs_entry_ts.min(), pd.to_datetime(strt_dt, format='%Y%m%d'))
+    fs_span_end = min(fs_exit_ts.max(), pd.to_datetime(end_dt, format='%Y%m%d'))
+    fs_daily_cnt, fs_daily_cap = [], []
+    for d in pd.bdate_range(fs_span_strt, fs_span_end):
+        holding = (fs_entry_ts <= d) & (fs_exit_ts >= d)
+        fs_daily_cnt.append(int(holding.sum()))
+        fs_daily_cap.append(df07.loc[holding, '매수금액'].sum())
+    fs_daily_cnt = pd.Series(fs_daily_cnt, dtype=float)
+    fs_daily_cap = pd.Series(fs_daily_cap, dtype=float)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("평균 종목 보유일", f"{fs_hold_days.mean():.1f}일", f"최대 {fs_hold_days.max()}일", delta_color="off")
+    k2.metric("평균 종목 보유 갯수",
+              f"{fs_daily_cnt.mean():.1f}종목" if not fs_daily_cnt.empty else "-",
+              f"최대 {fs_daily_cnt.max():.0f}종목" if not fs_daily_cnt.empty else None, delta_color="off")
+    k3.metric("평균 투입 자금",
+              f"{fs_daily_cap.mean():,.0f}원" if not fs_daily_cap.empty else "-",
+              f"최대 {fs_daily_cap.max():,.0f}원" if not fs_daily_cap.empty else None, delta_color="off")
+
+    fs_wins = df07[df07['실현손익'] > 0]
+    fs_losses = df07[df07['실현손익'] < 0]
+    fs_total_cnt = len(df07)
+    fs_win_rate = len(fs_wins) / fs_total_cnt * 100 if fs_total_cnt > 0 else 0.0
+    fs_avg_win = fs_wins['실현손익'].mean() if not fs_wins.empty else 0.0
+    fs_avg_loss = abs(fs_losses['실현손익'].mean()) if not fs_losses.empty else 0.0
+    fs_payoff_ratio = fs_avg_win / fs_avg_loss if fs_avg_loss > 0 else None
+    fs_avg_win_rt = fs_wins['수익률(%)'].mean() if not fs_wins.empty else 0.0
+    fs_avg_loss_rt = fs_losses['수익률(%)'].mean() if not fs_losses.empty else 0.0
+
+    n1, n2, n3 = st.columns(3)
+    n1.metric("첫매도 승률(건수)", f"{fs_win_rate:.1f}%({fs_total_cnt}건)",
+              f"수익 {len(fs_wins)}건 / 손실 {len(fs_losses)}건", delta_color="off")
+    n2.metric("첫매도 손익비 (평균수익/평균손실)", f"{fs_payoff_ratio:.2f}" if fs_payoff_ratio is not None else "-",
+              f"{fs_avg_win:,.0f}원 / {fs_avg_loss:,.0f}원", delta_color="off")
+    n3.metric("첫매도 실현손익 합계", f"{df07['실현손익'].sum():,.0f}원",
+              f"평균 수익률 {fs_avg_win_rt:+.2f}% / 손실률 {fs_avg_loss_rt:+.2f}%", delta_color="off")
+
+    df_display = df07.copy().reset_index(drop=True)
+
+    gb = GridOptionsBuilder.from_dataframe(df_display)
+    gb.configure_pagination(enabled=True, paginationPageSize=20)
+    gb.configure_grid_options(domLayout='normal')
+
+    fs_number_format_js = JsCode("""
+        function(params) {
+            if (params.value === null || params.value === undefined) {
+                return '';
+            }
+            return params.value.toLocaleString();
+        }
+    """)
+
+    fs_pnl_style_js = JsCode("""
+        function(params) {
+            if (params.value > 0) { return {'color': 'red'}; }
+            if (params.value < 0) { return {'color': 'blue'}; }
+            return {};
+        }
+    """)
+
+    gb.configure_column('종목명', width=120, pinned='left')
+    gb.configure_column('진입일', width=80)
+    gb.configure_column('첫매도일', width=80)
+
+    for col, width in {'평균단가': 80, '매도가': 80, '매도수량': 70, '매수금액': 100, '실현손익': 90, '수익률(%)': 70}.items():
+        if col in ('실현손익', '수익률(%)'):
+            gb.configure_column(col, type=['numericColumn'], cellRenderer=fs_number_format_js, cellStyle=fs_pnl_style_js, width=width)
+        else:
+            gb.configure_column(col, type=['numericColumn'], cellRenderer=fs_number_format_js, width=width)
+
+    AgGrid(
+        df_display,
+        gridOptions=gb.build(),
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True,
+        use_container_width=True,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+        excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
+        key=f"first_sell_grid_{acct_no}",
     )
 
 # 일별주문체결조회
