@@ -252,7 +252,17 @@ def save_note(record):
 def to_int(value):
     return 0 if value is None or pd.isna(value) else int(value)
 
-# 관심종목 조회/변경 (가격 변경·삭제는 모든 계좌의 해당 종목에 반영)
+nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
+
+# URL 쿼리 파라미터(?nickname=)로 전달된 닉네임이 있으면 기본 선택값으로 사용
+query_nickname = st.query_params.get('nickname')
+default_index = nickname.index(query_nickname) if query_nickname in nickname else 0
+
+my_choice = st.selectbox('닉네임을 선택하세요', nickname, index=default_index)
+
+acct_no = account(my_choice)
+
+# 관심종목 조회/변경 (조회·삭제는 선택 계좌 기준, 가격 변경은 모든 계좌의 해당 종목에 반영)
 st.header("관심종목")
 
 # 화면 항목명 → DB 컬럼 (UPDATE 시 컬럼명 화이트리스트로도 사용)
@@ -266,13 +276,13 @@ interest_price_cols = {
 }
 
 cur07 = conn.cursor()
-# 계좌 구분 없이 종목코드별 1건 (계좌별 값이 다르면 가장 최근 변경된 행 기준)
+# 선택 계좌의 관심종목
 cur07.execute(f"""
-    SELECT DISTINCT ON (code) code, name, {', '.join(interest_price_cols.values())}
+    SELECT code, name, {', '.join(interest_price_cols.values())}
     FROM public."interestItem_interest_item"
-    WHERE code NOT IN ('0001', '1001') AND proc_yn = 'Y'
-    ORDER BY code, last_chg_date DESC NULLS LAST
-""")
+    WHERE acct_no = %s AND code NOT IN ('0001', '1001') AND proc_yn = 'Y'
+    ORDER BY code
+""", (acct_no,))
 df_interest = pd.DataFrame(cur07.fetchall(), columns=['코드', '종목명'] + list(interest_price_cols))
 cur07.close()
 
@@ -312,8 +322,8 @@ else:
         }
     """)
 
-    # 종목코드/종목명 클릭 시 차트 팝업
-    gb.configure_column('코드', pinned='left', onCellClicked=CHART_CLICK_JS, cellStyle=CHART_LINK_STYLE)
+    # 종목명 클릭 시 차트 팝업
+    gb.configure_column('코드', hide=True)   # 변경 적용/차트 조회용
     gb.configure_column('종목명', pinned='left', onCellClicked=CHART_CLICK_JS, cellStyle=CHART_LINK_STYLE)
     for col in interest_price_cols:
         gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js,
@@ -324,9 +334,9 @@ else:
 
     grid_options = gb.build()
 
-    st.caption("가격 항목은 셀을 더블클릭해 수정하고, 삭제할 종목은 [삭제]를 체크한 뒤 "
-               "그리드 하단 [변경 적용]을 누르면 모든 계좌의 해당 종목에 한 번에 반영됩니다. "
-               "코드/종목명을 클릭하면 차트가 표시됩니다.")
+    st.caption("가격 항목은 셀을 더블클릭해 수정하고, 삭제할 종목은 [삭제]를 체크한 뒤 그리드 하단 [변경 적용]을 누르면 "
+               "가격 변경은 모든 계좌의 해당 종목에, 삭제는 선택한 계좌에만 반영됩니다. "
+               "종목명을 클릭하면 차트가 표시됩니다.")
 
     # AgGrid를 통해 데이터 출력 (그리드 하단 [변경 적용] 버튼 클릭 시에만 편집값 반환)
     grid_response = AgGrid(
@@ -338,18 +348,18 @@ else:
         update_mode=GridUpdateMode.NO_UPDATE,
         update_on=['filterChanged'],     # [변경 적용] 버튼/차트 클릭이 발생시키는 이벤트에서만 값 반환
         enable_enterprise_modules=True,  # 상태바 버튼 위해 필요
-        key="interest_grid",
+        key=f"interest_grid_{acct_no}",
     )
 
     edited_df = pd.DataFrame(grid_response['data'])
 
     # 코드/종목명 클릭으로 들어온 새 요청이면 차트 팝업
-    chart_target = new_chart_click(edited_df, "interest_chart_nonce", '코드', '종목명')
+    chart_target = new_chart_click(edited_df, f"interest_chart_nonce_{acct_no}", '코드', '종목명')
     if chart_target:
         show_stock_chart(*chart_target)
 
     # [변경 적용] 클릭으로 들어온 새 요청일 때만 편집 전/후 비교로 변경 항목 수집
-    apply_requested = is_new_apply_request(edited_df, "interest_apply_nonce")
+    apply_requested = is_new_apply_request(edited_df, f"interest_apply_nonce_{acct_no}")
     price_changes = []   # (코드, 종목명, 항목, DB컬럼, 변경 전, 변경 후)
     deletes = []         # (코드, 종목명)
     if apply_requested and '코드' in edited_df.columns:
@@ -377,7 +387,7 @@ else:
         try:
             applied = []
             for code_, name_, label, db_col, old_val, new_val in price_changes:
-                # db_col은 interest_price_cols 화이트리스트 값만 사용
+                # db_col은 interest_price_cols 화이트리스트 값만 사용, 가격은 모든 계좌의 해당 종목에 반영
                 cur_upd.execute(f"""
                     UPDATE public."interestItem_interest_item"
                        SET {db_col} = %s, last_chg_date = now()
@@ -388,9 +398,9 @@ else:
                 cur_upd.execute("""
                     UPDATE public."interestItem_interest_item"
                        SET proc_yn = 'N', last_chg_date = now()
-                     WHERE code = %s AND proc_yn = 'Y'
-                """, (code_,))
-                applied.append(f"{name_} 삭제 ({cur_upd.rowcount}개 계좌)")
+                     WHERE acct_no = %s AND code = %s AND proc_yn = 'Y'
+                """, (acct_no, code_))
+                applied.append(f"{name_} 삭제")
             conn.commit()
             st.session_state['interest_apply_msg'] = "변경 완료\n\n" + "\n\n".join(applied)
         except Exception as e:
@@ -401,16 +411,6 @@ else:
         if 'interest_apply_msg' in st.session_state:
             st.rerun()
 
-
-nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
-
-# URL 쿼리 파라미터(?nickname=)로 전달된 닉네임이 있으면 기본 선택값으로 사용
-query_nickname = st.query_params.get('nickname')
-default_index = nickname.index(query_nickname) if query_nickname in nickname else 0
-
-my_choice = st.selectbox('닉네임을 선택하세요', nickname, index=default_index)
-
-acct_no = account(my_choice)
 
 st.header("매매노트 작성")
 
