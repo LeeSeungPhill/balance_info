@@ -1520,7 +1520,7 @@ position_pnl = """
     from positions
     where opened_in_window and last_qty = 0 and sell_cnt > 0
     and exit_dt >= %s and exit_dt <= %s
-    order by exit_dt, name
+    order by exit_dt desc, name
 """
 
 cur06 = conn.cursor()
@@ -1694,7 +1694,7 @@ first_sell_pnl = """
     select name, entry_dt, sell_dt, hold_price, sell_price, qty, pnl, pnl_rate, buy_amt
     from first_sell
     where sell_dt >= %s and sell_dt <= %s
-    order by sell_dt, name
+    order by sell_dt desc, name
 """
 
 cur07 = conn.cursor()
