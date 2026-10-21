@@ -1,4 +1,5 @@
 import psycopg2 as db
+import json
 from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
@@ -201,12 +202,21 @@ def note_targets(acct_no, note_dt):
     return df.reset_index()
 
 
+# 방향흐름(direction_flow): DB 에는 코드(A~C)만 저장, 화면에는 설명 표시
+DIRECTION_FLOWS = {
+    'A': '상승',
+    'B': '패턴',
+    'C': '하락',
+}
+
+
 # 기존 매매노트 조회 (작성일자/계좌/종목 기준)
 def get_note(acct_no, note_dt, code, name):
 
     cur03 = conn.cursor()
     cur03.execute("""
-        SELECT buy_price, buy_qty, sell_price, sell_qty, buy_reason, sell_reason, principle_yn, good_point, improve_point
+        SELECT buy_price, buy_qty, sell_price, sell_qty, buy_reason, sell_reason, principle_yn, good_point, improve_point,
+               direction_flow
         FROM public.trading_note
         WHERE acct_no = %s AND note_dt = %s AND code = %s AND name = %s
     """, (acct_no, note_dt, code, name))
@@ -216,7 +226,7 @@ def get_note(acct_no, note_dt, code, name):
     if row is None:
         return None
     return dict(zip(['buy_price', 'buy_qty', 'sell_price', 'sell_qty', 'buy_reason', 'sell_reason',
-                     'principle_yn', 'good_point', 'improve_point'], row))
+                     'principle_yn', 'good_point', 'improve_point', 'direction_flow'], row))
 
 
 # 매매노트 저장 (동일 작성일자/계좌/종목이면 수정)
@@ -227,17 +237,18 @@ def save_note(record):
         cur04.execute("""
             INSERT INTO public.trading_note (
                 note_dt, acct_no, code, name, buy_price, buy_qty, sell_price, sell_qty,
-                buy_reason, sell_reason, principle_yn, good_point, improve_point, crt_dt, mod_dt
+                buy_reason, sell_reason, principle_yn, good_point, improve_point, direction_flow, crt_dt, mod_dt
             ) VALUES (
                 %(note_dt)s, %(acct_no)s, %(code)s, %(name)s, %(buy_price)s, %(buy_qty)s, %(sell_price)s, %(sell_qty)s,
-                %(buy_reason)s, %(sell_reason)s, %(principle_yn)s, %(good_point)s, %(improve_point)s, now(), now()
+                %(buy_reason)s, %(sell_reason)s, %(principle_yn)s, %(good_point)s, %(improve_point)s, %(direction_flow)s,
+                now(), now()
             )
             ON CONFLICT (acct_no, note_dt, code, name) DO UPDATE SET
                 buy_price = EXCLUDED.buy_price, buy_qty = EXCLUDED.buy_qty,
                 sell_price = EXCLUDED.sell_price, sell_qty = EXCLUDED.sell_qty,
                 buy_reason = EXCLUDED.buy_reason, sell_reason = EXCLUDED.sell_reason,
                 principle_yn = EXCLUDED.principle_yn, good_point = EXCLUDED.good_point,
-                improve_point = EXCLUDED.improve_point, mod_dt = now()
+                improve_point = EXCLUDED.improve_point, direction_flow = EXCLUDED.direction_flow, mod_dt = now()
         """, record)
         conn.commit()
         return True
@@ -275,15 +286,31 @@ interest_price_cols = {
     '추세하한가': 'trend_low_price',
 }
 
+# 관심유형(watch_type): DB 에는 코드(A~D)를 콤마로 연결해 저장(예: 'A,C'), 화면에는 설명 표시
+WATCH_TYPES = {
+    'A': '가장 최근 목표가 또는 EPS 수정이 상향',
+    'B': '실측 3개 분기 동안 매출·영업이익이 연속 증가',
+    'C': '직전 분기 대비 영업이익 증감이 ±10% 이내',
+    'D': '흑자전환 또는 적자축소이고, 정기보고서 접수일 이후 주가 상승이 +5% 이하',
+}
+
+
+def parse_watch_type(value):
+    """DB 문자열('A,C') 또는 그리드 반환값(리스트)을 A~D 코드만 남긴 정렬 리스트로 변환"""
+    if value is None or (not isinstance(value, (list, tuple)) and pd.isna(value)):
+        return []
+    items = value if isinstance(value, (list, tuple)) else str(value).split(',')
+    return sorted({str(v).strip() for v in items if str(v).strip() in WATCH_TYPES})
+
 cur07 = conn.cursor()
 # 선택 계좌의 관심종목
 cur07.execute(f"""
-    SELECT code, name, {', '.join(interest_price_cols.values())}
+    SELECT code, name, watch_type, {', '.join(interest_price_cols.values())}
     FROM public."interestItem_interest_item"
     WHERE acct_no = %s AND code NOT IN ('0001', '1001') AND proc_yn = 'Y'
     ORDER BY code
 """, (acct_no,))
-df_interest = pd.DataFrame(cur07.fetchall(), columns=['코드', '종목명'] + list(interest_price_cols))
+df_interest = pd.DataFrame(cur07.fetchall(), columns=['코드', '종목명', '관심유형'] + list(interest_price_cols))
 cur07.close()
 
 if 'interest_apply_msg' in st.session_state:
@@ -294,9 +321,15 @@ if df_interest.empty:
 else:
     for col in interest_price_cols:
         df_interest[col] = pd.to_numeric(df_interest[col], errors='coerce').fillna(0).astype(int)
+    # 리스트 컬럼은 Arrow 직렬화 시 그리드에서 JS 배열로 읽히지 않으므로 'A,C' 문자열로 전달
+    df_interest['관심유형'] = df_interest['관심유형'].map(lambda v: ','.join(parse_watch_type(v)))
     df_interest['삭제'] = False
     df_interest['_apply_nonce'] = 0.0
     df_interest['_chart_click'] = 0.0
+
+    # 그리드 컬럼 순서: 종목명 → 가격 항목 → 삭제 → 관심유형 (코드/_ 컬럼은 숨김)
+    df_interest = df_interest[['코드', '종목명'] + list(interest_price_cols)
+                              + ['삭제', '관심유형', '_apply_nonce', '_chart_click']]
 
     gb = GridOptionsBuilder.from_dataframe(df_interest)
     gb.configure_column('_apply_nonce', hide=True)
@@ -329,13 +362,53 @@ else:
         gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js,
                             editable=True, cellEditor='agNumberCellEditor',
                             cellStyle={'backgroundColor': '#fff8e1'})
+
+    # 관심유형: 행 데이터는 'A,C' 문자열, 그리드 안에서만 코드 배열로 변환해 다중 선택
+    # (valueGetter: 문자열 → 배열, valueSetter: 선택 배열 → 문자열), 셀/선택목록에는 코드 설명 표시
+    watch_type_js = f"const WATCH_TYPES = {json.dumps(WATCH_TYPES, ensure_ascii=False)};"
+    gb.configure_column('관심유형', editable=True, cellDataType=False, singleClickEdit=True,
+                        valueGetter=JsCode("""
+                            function(params) {
+                                const v = params.data ? params.data['관심유형'] : null;
+                                return v ? String(v).split(',').filter(c => c) : [];
+                            }
+                        """),
+                        valueSetter=JsCode("""
+                            function(params) {
+                                const nv = params.newValue;
+                                const codes = Array.isArray(nv) ? nv : (nv ? String(nv).split(',') : []);
+                                const joined = Array.from(new Set(codes.filter(c => c))).sort().join(',');
+                                if (joined === (params.data['관심유형'] || '')) { return false; }
+                                params.data['관심유형'] = joined;
+                                return true;
+                            }
+                        """),
+                        cellEditor='agRichSelectCellEditor', cellEditorPopup=True,
+                        cellEditorParams={
+                            'values': list(WATCH_TYPES),
+                            'multiSelect': True,
+                            'formatValue': JsCode("""
+                                function(v) { %s return WATCH_TYPES[v] ? '[' + v + '] ' + WATCH_TYPES[v] : v; }
+                            """ % watch_type_js),
+                        },
+                        valueFormatter=JsCode("""
+                            function(params) {
+                                %s
+                                const v = params.value;
+                                if (!v || v.length === 0) { return ''; }
+                                return (Array.isArray(v) ? v : String(v).split(',')).map(c => WATCH_TYPES[c] ? '[' + c + '] ' + WATCH_TYPES[c] : c).join('\\n');   // 항목별 줄바꿈
+                            }
+                        """ % watch_type_js),
+                        maxWidth=500, wrapText=True, autoHeight=True,
+                        # pre-line: 항목 사이 줄바꿈은 유지하고 긴 설명은 자동 줄바꿈
+                        cellStyle={'backgroundColor': '#fff8e1', 'whiteSpace': 'pre-line', 'lineHeight': '1.6'})
     gb.configure_column('삭제', cellDataType='boolean', editable=True,
                         cellRenderer='agCheckboxCellRenderer', cellEditor='agCheckboxCellEditor')
 
     grid_options = gb.build()
 
-    st.caption("가격 항목은 셀을 더블클릭해 수정하고, 삭제할 종목은 [삭제]를 체크한 뒤 그리드 하단 [변경 적용]을 누르면 "
-               "가격 변경은 모든 계좌의 해당 종목에, 삭제는 선택한 계좌에만 반영됩니다. "
+    st.caption("가격 항목은 셀을 더블클릭해 수정하고, 관심유형은 셀을 클릭해 여러 개를 선택하며, 삭제할 종목은 [삭제]를 체크한 뒤 "
+               "그리드 하단 [변경 적용]을 누르면 가격·관심유형 변경은 모든 계좌의 해당 종목에, 삭제는 선택한 계좌에만 반영됩니다. "
                "종목명을 클릭하면 차트가 표시됩니다.")
 
     # AgGrid를 통해 데이터 출력 (그리드 하단 [변경 적용] 버튼 클릭 시에만 편집값 반환)
@@ -362,6 +435,7 @@ else:
     apply_requested = is_new_apply_request(edited_df, f"interest_apply_nonce_{acct_no}")
     price_changes = []   # (코드, 종목명, 항목, DB컬럼, 변경 전, 변경 후)
     deletes = []         # (코드, 종목명)
+    watch_changes = []   # (코드, 종목명, 변경 전 코드리스트, 변경 후 코드리스트)
     if apply_requested and '코드' in edited_df.columns:
         orig_by_code = df_interest.set_index('코드')
         for _, row in edited_df.iterrows():
@@ -371,6 +445,10 @@ else:
             if row.get('삭제') in (True, 'true', 'True'):
                 deletes.append((code_, row['종목명']))
                 continue
+            old_watch = parse_watch_type(orig_by_code.at[code_, '관심유형'])
+            new_watch = parse_watch_type(row.get('관심유형'))
+            if new_watch != old_watch:
+                watch_changes.append((code_, row['종목명'], old_watch, new_watch))
             for label, db_col in interest_price_cols.items():
                 try:
                     new_val = int(float(row[label]))
@@ -380,9 +458,9 @@ else:
                 if new_val != old_val:
                     price_changes.append((code_, row['종목명'], label, db_col, old_val, new_val))
 
-    if apply_requested and not price_changes and not deletes:
+    if apply_requested and not price_changes and not deletes and not watch_changes:
         st.info("변경된 항목이 없습니다.")
-    elif price_changes or deletes:
+    elif price_changes or deletes or watch_changes:
         cur_upd = conn.cursor()
         try:
             applied = []
@@ -394,6 +472,15 @@ else:
                      WHERE code = %s AND proc_yn = 'Y'
                 """, (new_val, code_))
                 applied.append(f"{name_} {label} {old_val:,} → {new_val:,} ({cur_upd.rowcount}개 계좌)")
+            for code_, name_, old_watch, new_watch in watch_changes:
+                # 관심유형도 가격과 같이 모든 계좌의 해당 종목에 반영 (선택 없으면 NULL)
+                cur_upd.execute("""
+                    UPDATE public."interestItem_interest_item"
+                       SET watch_type = %s, last_chg_date = now()
+                     WHERE code = %s AND proc_yn = 'Y'
+                """, (','.join(new_watch) or None, code_))
+                applied.append(f"{name_} 관심유형 {','.join(old_watch) or '없음'} → {','.join(new_watch) or '없음'} "
+                               f"({cur_upd.rowcount}개 계좌)")
             for code_, name_ in deletes:
                 cur_upd.execute("""
                     UPDATE public."interestItem_interest_item"
@@ -456,6 +543,7 @@ else:
             'buy_price': target.get('buy_price'), 'buy_qty': target.get('buy_qty'),
             'sell_price': target.get('sell_price'), 'sell_qty': target.get('sell_qty'),
             'buy_reason': '', 'sell_reason': '', 'principle_yn': 'Y', 'good_point': '', 'improve_point': '',
+            'direction_flow': None,
         }
     else:
         st.caption("이미 작성된 매매노트가 있습니다. 저장 시 수정됩니다.")
@@ -469,6 +557,13 @@ else:
         buy_qty = c2.number_input("매수량", min_value=0, step=1, value=to_int(note['buy_qty']), key=f"bq_{key}")
         sell_price = c3.number_input("매도가", min_value=0, step=1, value=to_int(note['sell_price']), key=f"sp_{key}")
         sell_qty = c4.number_input("매도량", min_value=0, step=1, value=to_int(note['sell_qty']), key=f"sq_{key}")
+
+        # 방향흐름: 코드(A~C) 선택, 화면에는 설명만 표시 (미선택 시 NULL 저장)
+        flow_options = [None] + list(DIRECTION_FLOWS)
+        direction_flow = st.selectbox("방향흐름", flow_options,
+                                      index=flow_options.index(note['direction_flow']) if note['direction_flow'] in DIRECTION_FLOWS else 0,
+                                      format_func=lambda c: '선택하세요' if c is None else DIRECTION_FLOWS[c],
+                                      key=f"df_{key}")
 
         buy_reason = st.text_area("매수근거", value=note['buy_reason'] or '', key=f"br_{key}")
         sell_reason = st.text_area("매도근거", value=note['sell_reason'] or '', key=f"sr_{key}")
@@ -486,6 +581,7 @@ else:
             'buy_reason': buy_reason, 'sell_reason': sell_reason,
             'principle_yn': 'Y' if principle == '준수' else 'N',
             'good_point': good_point, 'improve_point': improve_point,
+            'direction_flow': direction_flow,
         }
         if save_note(record):
             # 종목 레이블의 [노트] 표시가 바로 반영되도록 재실행 (저장 메시지는 재실행 후 표시)
@@ -504,14 +600,14 @@ end_date = c2.date_input("조회종료일", datetime.now())
 
 cur05 = conn.cursor()
 cur05.execute("""
-    SELECT note_dt, code, name, buy_price, buy_qty, sell_price, sell_qty,
+    SELECT note_dt, code, name, buy_price, buy_qty, sell_price, sell_qty, direction_flow,
            buy_reason, sell_reason, CASE principle_yn WHEN 'Y' THEN '준수' WHEN 'N' THEN '미준수' ELSE '' END,
            good_point, improve_point, (SELECT nick_name FROM public."stockAccount_stock_account" WHERE acct_no = A.acct_no) AS nick_name
     FROM public.trading_note A
     WHERE note_dt BETWEEN %s AND %s
     ORDER BY note_dt DESC, name
 """, (strt_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")))
-df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목코드', '종목명', '매수가', '매수량', '매도가', '매도량',
+df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목코드', '종목명', '매수가', '매수량', '매도가', '매도량', '방향흐름',
                                                    '매수근거', '매도근거', '매매원칙 준수여부', '잘한점', '개선할 점', '닉네임'])
 cur05.close()
 
@@ -520,6 +616,7 @@ if df_notes.empty:
 else:
     for col in ['매수가', '매도가']:
         df_notes[col] = pd.to_numeric(df_notes[col], errors='coerce')
+    df_notes['방향흐름'] = df_notes['방향흐름'].map(lambda c: DIRECTION_FLOWS.get(c, ''))   # 코드 → 설명
     df_notes['_chart_click'] = 0.0
 
     gb = GridOptionsBuilder.from_dataframe(df_notes)
