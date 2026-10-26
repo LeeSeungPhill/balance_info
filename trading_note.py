@@ -532,7 +532,9 @@ else:
     labels = [(f"{r.name} ({r.code}) [{r.구분}]" if r.code else f"{r.name} [{r.구분}]")
               + (" [노트]" if (r.code, r.name) in noted else "")
               for r in df_targets.itertuples()]
-    selected_idx = st.selectbox("종목명을 선택하세요", range(len(labels)), format_func=lambda i: labels[i])
+    # key 가 없으면 레이블([노트] 표시)이 바뀔 때 새 위젯으로 인식되어 첫 종목으로 선택이 초기화되므로 key 고정
+    selected_idx = st.selectbox("종목명을 선택하세요", range(len(labels)), format_func=lambda i: labels[i],
+                                key=f"note_target_{acct_no}_{note_dt}")
     target = df_targets.iloc[selected_idx]
     code, name = target['code'], target['name']
 
