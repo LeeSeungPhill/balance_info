@@ -587,21 +587,28 @@ else:
         # Streamlit 앱 구성
         st.title("일별 주문체결 조회")
 
-        # 주문유형 필터
+        # 주문유형 필터 ('전체' 선택 시 전체 주문유형)
         all_types = df4['주문유형'].unique()
         주문유형리스트 = [t for t in all_types if t in ('매수', '매도')]
-        선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트)
+        선택주문유형 = st.selectbox("주문유형을 선택하세요", ['전체'] + 주문유형리스트, key='crypto_order_type')
+        선택주문유형목록 = 주문유형리스트 if 선택주문유형 == '전체' else [선택주문유형]
 
-        # 주문상태 필터
+        # 주문상태 필터 ('전체' 선택 시 전체 주문상태)
         all_states = df4['주문상태'].unique()
         주문상태리스트 = [t for t in all_states if t in ('done', 'cancel', 'wait')]
-        선택주문상태 = st.selectbox("주문상태를 선택하세요", 주문상태리스트)
+        선택주문상태 = st.selectbox("주문상태를 선택하세요", ['전체'] + 주문상태리스트, key='crypto_order_state')
+        선택주문상태목록 = 주문상태리스트 if 선택주문상태 == '전체' else [선택주문상태]
 
-        # 선택한 주문유형 + 주문상태로 필터링
+        # 체결대상: 체결수량이 존재하는 주문만 조회
+        체결대상 = st.checkbox("체결대상", key='crypto_ccld_only')
+
+        # 선택한 주문유형 + 주문상태 (+ 체결대상)로 필터링
         선택필터_df = df4[
-            (df4['주문유형'] == 선택주문유형) &
-            (df4['주문상태'] == 선택주문상태)
+            (df4['주문유형'].isin(선택주문유형목록)) &
+            (df4['주문상태'].isin(선택주문상태목록))
         ].copy()
+        if 체결대상:
+            선택필터_df = 선택필터_df[선택필터_df['체결수량'] > 0]
 
         # 날짜/시간 포맷 변경
         선택필터_df['주문일자'] = pd.to_datetime(선택필터_df['주문일자'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
@@ -612,8 +619,6 @@ else:
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
-        # 주문유형 컬럼 숨기기
-        gb.configure_column('주문유형', hide=True)
         # 원주문번호 컬럼 숨기기
         gb.configure_column('원주문번호', hide=True)
         # 페이지당 20개 표시
@@ -623,36 +628,17 @@ else:
         gb.configure_grid_options(enableRangeSelection=True)
         gb.configure_grid_options(enableExcelExport=True)
 
-        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-        auto_size_js = JsCode("""
-        function onFirstDataRendered(params) {
-            const allColumnIds = [];
-            params.columnApi.getAllColumns().forEach(function(column) {
-                allColumnIds.push(column.getId());
-            });
-            params.columnApi.autoSizeColumns(allColumnIds, false);
-        }
+        # 각 컬럼을 셀 내용·컬럼명이 모두 보이는 너비로 자동 맞춤
+        # 화면 밖 컬럼도 측정되도록 컬럼 가상화를 끄고, 데이터 렌더링/페이지 이동 후 전체 컬럼 자동 크기 재적용
+        auto_size_all_js = JsCode("""
+            function(params) { params.api.autoSizeAllColumns(false); }
         """)
-        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-        column_widths = {
-            '주문일자': 80,
-            '주문시각': 80,
-            '종목명': 140,
-            '주문상태': 80,
-            '주문번호': 100,
-            '주문금액': 100,
-            '체결금액': 100,
-            '보유단가': 100,
-            '보유수량': 100,
-            '주문단가': 100,
-            '주문수량': 100,
-            # '체결단가': 80,
-            '체결수량': 100,
-            '잔여수량': 100,
-            '수수료': 70,
-            '손실수익금': 100
-        }
+        gb.configure_grid_options(
+            autoSizeStrategy={'type': 'fitCellContents', 'skipHeader': False},
+            suppressColumnVirtualisation=True,
+            onFirstDataRendered=auto_size_all_js,
+            onPaginationChanged=auto_size_all_js,
+        )
 
         # 숫자 포맷 JS
         number_format_js = JsCode("""
@@ -665,11 +651,8 @@ else:
         """)
 
         # 숫자 포맷 적용
-        for col, width in column_widths.items():
-            if col in ['보유단가', '보유수량', '주문단가', '주문수량', '체결수량', '잔여수량', '취소수량', '주문금액', '체결금액', '수수료', '손실수익금']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-            else:
-                gb.configure_column(col, width=width)
+        for col in ['보유단가', '보유수량', '주문단가', '주문수량', '체결수량', '잔여수량', '주문금액', '체결금액', '수수료', '손실수익금']:
+            gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js)
 
         grid_options = gb.build()
 

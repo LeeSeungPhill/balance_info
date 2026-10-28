@@ -645,51 +645,75 @@ def inquire_period_profit(access_token, app_key, app_secret, code, strt_dt, end_
         return []
     
 # 일별주문체결조회
+def _inquire_daily_ccld(access_token, app_key, app_secret, acct_no, tr_id, strt_dt, end_dt):
+    """주식일별주문체결조회 1개 기간 조회. 응답 헤더 tr_cont 가 M/F 이면 다음 페이지가 있으므로 끝까지 연속 조회"""
+    URL = f"{URL_BASE}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+    rows, ctx_fk, ctx_nk, tr_cont = [], "", "", ""
+
+    for _ in range(100):    # 연속조회 무한반복 방지
+        headers = {"Content-Type": "application/json",
+                   "authorization": f"Bearer {access_token}",
+                   "appKey": app_key,
+                   "appSecret": app_secret,
+                   "tr_id": tr_id,
+                   "tr_cont": tr_cont,    # 최초 "" , 연속조회 시 "N"
+                   "custtype": "P"}
+        params = {
+                'CANO': acct_no,            # 종합계좌번호 계좌번호 체계(8-2)의 앞 8자리
+                'ACNT_PRDT_CD':"01",        # 계좌상품코드 계좌번호 체계(8-2)의 뒤 2자리
+                'SORT_DVSN': "01",          # 00: 최근 순, 01: 과거 순, 02: 최근 순
+                'INQR_STRT_DT': strt_dt,    # 조회시작일(8자리)
+                'INQR_END_DT': end_dt,      # 조회종료일(8자리)
+                'SLL_BUY_DVSN_CD': "00",    # 매도매수구분코드 00 : 전체 / 01 : 매도 / 02 : 매수
+                'PDNO': "",                 # 종목번호(6자리) ""공란입력 시, 전체
+                'ORD_GNO_BRNO': "",         # 주문채번지점번호 ""공란입력 시, 전체
+                'ODNO': "",                 # 주문번호 ""공란입력 시, 전체
+                'CCLD_DVSN': "00",          # 체결구분 00 전체, 01 체결, 02 미체결
+                'INQR_DVSN': "00",          # 조회구분 00 역순, 01 정순
+                'INQR_DVSN_1': "",          # 조회구분1 없음: 전체, 1: ELW, 2: 프리보드
+                'INQR_DVSN_3': "00",        # 조회구분3 00 전체, 01 현금, 02 신용, 03 담보, 04 대주, 05 대여, 06 자기융자신규/상환, 07 유통융자신규/상환
+                'EXCG_ID_DVSN_CD': "ALL",   # 거래소ID구분코드 KRX : KRX, NXT : NXT, SOR (Smart Order Routing) : SOR, ALL : 전체
+                'CTX_AREA_FK100': ctx_fk,   # 연속조회검색조건100 (직전 응답값)
+                'CTX_AREA_NK100': ctx_nk,   # 연속조회키100 (직전 응답값)
+        }
+        res = requests.get(URL, headers=headers, params=params, verify=False, timeout=10)
+        ar = resp.APIResp(res)
+        if not ar.isOK():
+            print(f"일별주문체결조회 오류({tr_id} {strt_dt}~{end_dt}): {ar.getErrorCode()} {ar.getErrorMessage()}")
+            break
+
+        body = ar.getBody()
+        rows.extend(getattr(body, 'output1', None) or [])
+
+        if res.headers.get('tr_cont') not in ('M', 'F'):
+            break
+        ctx_fk = getattr(body, 'ctx_area_fk100', "")
+        ctx_nk = getattr(body, 'ctx_area_nk100', "")
+        tr_cont = "N"
+        time.sleep(0.1)     # 초당 호출 제한 대응
+
+    return rows
+
+# 주식일별주문체결조회 : 3개월 이내는 TTTC0081R, 3개월 이전은 CTSC9215R 로 조회기간을 나눠 조회 후 합침
 def get_my_complete(access_token, app_key, app_secret, acct_no, strt_dt, end_dt):
 
-    headers = {"Content-Type": "application/json",
-               "authorization": f"Bearer {access_token}",
-               "appKey": app_key,
-               "appSecret": app_secret,
-               "tr_id": "TTTC0081R",
-               "custtype": "P"}
-    params = {
-            'CANO': acct_no,            # 종합계좌번호 계좌번호 체계(8-2)의 앞 8자리
-            'ACNT_PRDT_CD':"01",        # 계좌상품코드 계좌번호 체계(8-2)의 뒤 2자리
-            'SORT_DVSN': "01",          # 00: 최근 순, 01: 과거 순, 02: 최근 순
-            'INQR_STRT_DT': strt_dt,    # 조회시작일(8자리) 
-            'INQR_END_DT': end_dt,      # 조회종료일(8자리)
-            'SLL_BUY_DVSN_CD': "00",    # 매도매수구분코드 00 : 전체 / 01 : 매도 / 02 : 매수
-            'PDNO': "",                 # 종목번호(6자리) ""공란입력 시, 전체
-            'ORD_GNO_BRNO': "",         # 주문채번지점번호 ""공란입력 시, 전체
-            'ODNO': "",                 # 주문번호 ""공란입력 시, 전체
-            'CCLD_DVSN': "00",          # 체결구분 00 전체, 01 체결, 02 미체결
-            'INQR_DVSN': "00",          # 조회구분 00 역순, 01 정순
-            'INQR_DVSN_1': "",          # 조회구분1 없음: 전체, 1: ELW, 2: 프리보드
-            'INQR_DVSN_3': "00",        # 조회구분3 00 전체, 01 현금, 02 신용, 03 담보, 04 대주, 05 대여, 06 자기융자신규/상환, 07 유통융자신규/상환
-            'EXCG_ID_DVSN_CD': "ALL",   # 거래소ID구분코드 KRX : KRX, NXT : NXT, SOR (Smart Order Routing) : SOR, ALL : 전체
-            'CTX_AREA_NK100': "",
-            'CTX_AREA_FK100': "" 
-    }
-    PATH = "uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-    URL = f"{URL_BASE}/{PATH}"
+    recent_strt = (datetime.now() - relativedelta(months=3) + timedelta(days=1)).strftime("%Y%m%d")
+    old_end = (datetime.strptime(recent_strt, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
 
+    periods = []
+    if strt_dt <= old_end:
+        periods.append(("CTSC9215R", strt_dt, min(end_dt, old_end)))
+    if end_dt >= recent_strt:
+        periods.append(("TTTC0081R", max(strt_dt, recent_strt), end_dt))
+
+    result = []
     try:
-        res = requests.get(URL, headers=headers, params=params, verify=False)
-        ar = resp.APIResp(res)
-
-        # 응답에 output1이 있는지 확인
-        body = ar.getBody()
-        if hasattr(body, 'output1'):
-            return body.output1
-        else:
-            print("일별주문체결조회 응답이 없습니다.")
-            return []  # 혹은 None
-
+        for tr_id, p_strt, p_end in periods:
+            result.extend(_inquire_daily_ccld(access_token, app_key, app_secret, acct_no, tr_id, p_strt, p_end))
     except Exception as e:
         print("일별주문체결조회 중 오류 발생:", e)
-        return []
-    
+    return result
+
 # 주식예약주문조회 : 15시 40분 ~ 다음 영업일 07시 30분까지 가능(23시 40분 ~ 0시 10분까지 서버초기화 작업시간 불가)
 def order_reserve_complete(access_token, app_key, app_secret, reserce_strt_dt, reserve_end_dt, acct_no, code):
 
@@ -1828,8 +1852,8 @@ else:
                 '주문일자': item['ord_dt'],
                 '주문시각': item['ord_tmd'],
                 '종목명': item['prdt_name'],
-                '주문번호': float(odno) if odno != "" else "",
-                '원주문번호': float(orgn_odno) if orgn_odno != "" else "",
+                '주문번호': float(odno) if odno != "" else None,
+                '원주문번호': float(orgn_odno) if orgn_odno != "" else None,
                 '체결금액': float(item['tot_ccld_amt']),
                 '주문유형': item['sll_buy_dvsn_cd_name'],
                 '주문단가': float(item['ord_unpr']),
@@ -1848,11 +1872,18 @@ else:
         # Streamlit 앱 구성
         st.title("일별 주문체결 조회")
 
+        # 주문유형 필터 ('전체' 선택 시 전체 주문유형)
         all_types = df4['주문유형'].unique()
         주문유형리스트 = [t for t in all_types if t in ('현금매수', '현금매도', '매수정정*', '매도정정*')]
-        선택주문유형 = st.selectbox("주문유형을 선택하세요", 주문유형리스트)
+        선택주문유형 = st.selectbox("주문유형을 선택하세요", ['전체'] + 주문유형리스트, key='kis_order_type')
+        선택주문유형목록 = 주문유형리스트 if 선택주문유형 == '전체' else [선택주문유형]
 
-        선택주문유형_df = df4[df4['주문유형'] == 선택주문유형].copy()
+        # 체결대상: 체결수량이 존재하는 주문만 조회
+        체결대상 = st.checkbox("체결대상", key='kis_ccld_only')
+
+        선택주문유형_df = df4[df4['주문유형'].isin(선택주문유형목록)].copy()
+        if 체결대상:
+            선택주문유형_df = 선택주문유형_df[선택주문유형_df['체결수량'] > 0]
 
         선택주문유형_df['주문일자'] = pd.to_datetime(선택주문유형_df['주문일자'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
         선택주문유형_df['주문시각'] = pd.to_datetime(선택주문유형_df['주문시각'], format='%H%M%S').dt.strftime('%H:%M:%S')
@@ -1861,8 +1892,6 @@ else:
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
-        # 주문유형 컬럼 숨기기
-        gb.configure_column('주문유형', hide=True)
         # 원주문번호 컬럼 숨기기
         gb.configure_column('원주문번호', hide=True)
         # 페이지당 20개 표시
@@ -1872,31 +1901,17 @@ else:
         gb.configure_grid_options(enableRangeSelection=True)
         gb.configure_grid_options(enableExcelExport=True)
 
-        # JS 코드: 첫 렌더링 시 모든 컬럼 자동 크기 맞춤 (컬럼명 포함)
-        auto_size_js = JsCode("""
-        function onFirstDataRendered(params) {
-            const allColumnIds = [];
-            params.columnApi.getAllColumns().forEach(function(column) {
-                allColumnIds.push(column.getId());
-            });
-            params.columnApi.autoSizeColumns(allColumnIds, false);
-        }
+        # 각 컬럼을 셀 내용·컬럼명이 모두 보이는 너비로 자동 맞춤
+        # 화면 밖 컬럼도 측정되도록 컬럼 가상화를 끄고, 데이터 렌더링/페이지 이동 후 전체 컬럼 자동 크기 재적용
+        auto_size_all_js = JsCode("""
+            function(params) { params.api.autoSizeAllColumns(false); }
         """)
-        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
-
-        column_widths = {
-            '주문일자': 60,
-            '주문시각': 60,
-            '종목명': 140,
-            '주문번호': 70,
-            '체결금액': 100,
-            '주문단가': 80,
-            '주문수량': 70,
-            '체결단가': 80,
-            '체결수량': 70,
-            '잔여수량': 70,
-            '거래소': 50,
-        }
+        gb.configure_grid_options(
+            autoSizeStrategy={'type': 'fitCellContents', 'skipHeader': False},
+            suppressColumnVirtualisation=True,
+            onFirstDataRendered=auto_size_all_js,
+            onPaginationChanged=auto_size_all_js,
+        )
 
         # 숫자 포맷을 JS 코드로 적용 (정렬 문제 방지)
         number_format_js = JsCode("""
@@ -1909,11 +1924,8 @@ else:
         """)
 
         # 숫자 포맷을 적용할 컬럼들 설정
-        for col, width in column_widths.items():
-            if col in ['주문단가', '주문수량', '체결단가', '체결수량', '잔여수량', '취소수량', '체결금액']:
-                gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
-            else:
-                gb.configure_column(col, width=width)
+        for col in ['주문단가', '주문수량', '체결단가', '체결수량', '잔여수량', '체결금액']:
+            gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js)
 
         grid_options = gb.build()
 
