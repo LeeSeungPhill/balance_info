@@ -348,7 +348,7 @@ else:
         st.plotly_chart(fig)
 
 # strt_dt = (st.date_input("시작일", datetime.today() - timedelta(days=30))).strftime("%Y%m%d")
-strt_dt = (st.date_input("시작일", datetime(2026, 1, 1), key="strt_dt_balance")).strftime("%Y%m%d")
+strt_dt = (st.date_input("시작일", datetime.today().replace(day=1), key="strt_dt_balance")).strftime("%Y%m%d")
 end_dt = (st.date_input("종료일", datetime.today(), key="end_dt_balance")).strftime("%Y%m%d")
 
 cur2 = conn.cursor()

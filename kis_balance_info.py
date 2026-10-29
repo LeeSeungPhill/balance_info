@@ -1136,7 +1136,7 @@ code = ""
 # end_dt = selected_date[1].strftime("%Y%m%d")
 
 # strt_dt = (st.date_input("시작일", datetime.today() - timedelta(days=30))).strftime("%Y%m%d")
-strt_dt = (st.date_input("시작일", datetime(2026, 1, 1))).strftime("%Y%m%d")
+strt_dt = (st.date_input("시작일", datetime.today().replace(day=1))).strftime("%Y%m%d")
 end_dt = (st.date_input("종료일", datetime.today())).strftime("%Y%m%d")
 
 # 기간별 총평가
