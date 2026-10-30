@@ -27,7 +27,12 @@ MENU_SCRIPTS = {
     'KIS': 'kis_balance_info.py',
     '노트': 'trading_note.py',
 }
-menu_choice = st.selectbox('메뉴를 선택하세요', list(MENU_SCRIPTS), key='main_menu')
+# 닉네임별로 노출할 메뉴 제한 (지정되지 않은 닉네임은 전체 메뉴)
+MENU_BY_NICKNAME = {
+    'worry106': ['KIS', '전체'],
+}
+menu_options = MENU_BY_NICKNAME.get(st.query_params.get('nickname'), list(MENU_SCRIPTS))
+menu_choice = st.selectbox('메뉴를 선택하세요', menu_options, index=menu_options.index('KIS'), key='main_menu')
 if MENU_SCRIPTS[menu_choice]:
     runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), MENU_SCRIPTS[menu_choice]),
                    run_name='__main__')
