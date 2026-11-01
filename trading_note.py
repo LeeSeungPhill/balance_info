@@ -279,17 +279,18 @@ def to_int(value):
 
 nickname = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
 
-# URL 쿼리 파라미터(?nickname=)로 전달된 닉네임이 있으면 기본 선택값으로 사용
-query_nickname = st.query_params.get('nickname')
-default_index = nickname.index(query_nickname) if query_nickname in nickname else 0
-
 # 매매노트 조회 그리드에서 행을 클릭하면 해당 노트의 닉네임/작성일자/종목을 위젯 생성 전에 설정
 # (위젯이 그려진 뒤에는 session_state 로 값을 바꿀 수 없으므로 요청을 저장 후 재실행하여 여기서 반영)
+# 다른 닉네임의 노트면 쿼리 파라미터의 닉네임을 바꿔 해당 계좌로 전환
 note_load_request = st.session_state.pop('note_load_request', None)
 if note_load_request:
-    st.session_state['nickname_select'] = note_load_request['nick']
+    st.query_params['nickname'] = note_load_request['nick']
     st.session_state['note_dt_select'] = note_load_request['note_dt']
     st.session_state['note_load_target'] = note_load_request
+
+# 닉네임은 화면에서 선택하지 않고 URL 쿼리 파라미터(?nickname=)로 전달받은 값 사용 (없거나 목록에 없으면 첫 번째 닉네임)
+query_nickname = st.query_params.get('nickname')
+my_choice = query_nickname if query_nickname in nickname else nickname[0]
 
 # 화면 항목명 → DB 컬럼 (UPDATE 시 컬럼명 화이트리스트로도 사용)
 interest_price_cols = {
@@ -321,10 +322,6 @@ def parse_watch_type(value):
 # 매매노트 조회
 st.header("매매노트 조회")
 
-# key 로 값을 관리하므로 session_state 에 값이 없을 때만 기본 index 지정 (중복 지정 경고 방지)
-my_choice = st.selectbox('닉네임을 선택하세요', nickname, key='nickname_select',
-                         **({} if 'nickname_select' in st.session_state else {'index': default_index}))
-
 acct_no = account(my_choice)
 
 # 작성기간은 시작일~종료일이 모두 보이도록 폭을 넓게 배정
@@ -341,8 +338,8 @@ item_cond = f"COALESCE(TRIM({note_item_cols[item_filter]}), '') <> ''" if item_f
 result_choice = c4.selectbox("매매대응 결과", [None] + list(PRINCIPLES),
                              format_func=lambda c: '전체' if c is None else PRINCIPLES[c])
 result_filter = [result_choice] if result_choice else []
-# 닉네임 조건: 여러 개 선택 가능, 선택하지 않으면 전체
-nick_filter = c5.multiselect("닉네임", nickname, placeholder="전체")
+# 종목명 조건: 입력한 글자가 포함된 종목 (대소문자 무시, 비우면 전체)
+name_filter = c5.text_input("종목명", placeholder="전체").strip()
 
 cur05 = conn.cursor()
 cur05.execute("""
@@ -353,13 +350,14 @@ cur05.execute("""
     FROM public.trading_note A
     WHERE note_dt BETWEEN %(strt_dt)s AND %(end_dt)s
       AND (%(no_result_filter)s OR principle_yn = ANY(%(result_filter)s))
-      AND (%(no_nick_filter)s OR acct_no IN (SELECT acct_no FROM public."stockAccount_stock_account"
-                                             WHERE nick_name = ANY(%(nick_filter)s)))
+      AND acct_no = %(acct_no)s
+      AND name ILIKE %(name_filter)s
       AND (""" + item_cond + """)
     ORDER BY note_dt DESC, name
 """, {'strt_dt': strt_date.strftime("%Y%m%d"), 'end_dt': end_date.strftime("%Y%m%d"),
       'no_result_filter': not result_filter, 'result_filter': result_filter,
-      'no_nick_filter': not nick_filter, 'nick_filter': nick_filter})
+      'acct_no': acct_no,   # 쿼리 파라미터로 전달받은 닉네임의 계좌
+      'name_filter': f"%{name_filter}%"})
 df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목코드', '종목명', '매수가', '매수량', '매도가', '매도량', '방향흐름',
                                                    '매수근거', '매도근거', '매매대응 결과', '잘한점', '개선할 점', '닉네임', '계좌번호'])
 cur05.close()
