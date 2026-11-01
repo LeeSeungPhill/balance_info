@@ -18,30 +18,161 @@ URL_BASE = "https://openapi.koreainvestment.com:9443"       # 실전서비스
 KW_URL_BASE = "https://api.kiwoom.com"    
 SOCKET_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"  # 접속 URL
 
-# 편집 가능한 AG-Grid 하단 상태바의 [변경 적용] 버튼.
-# 셀 편집만으로는 Streamlit 재실행이 일어나지 않도록 update_on=['filterChanged'] 만 사용하고,
-# 버튼 클릭 시 편집 확정 + 숨김 컬럼(_apply_nonce)에 클릭 시각 기록 + filterChanged 발생으로 한 번만 데이터를 반환한다.
-APPLY_EDITS_PANEL_JS = JsCode("""
-class ApplyEditsPanel {
+# AG-Grid 하단 상태바 툴바: 총건수 / (선택)콤보 필터 / (선택)체크박스 필터 / 종목명 검색 / 새로고침 / (선택)[변경 적용]
+# 검색·콤보 필터는 브라우저 안에서만 처리하고(Streamlit 재실행 없음), 새로고침·[변경 적용] 클릭 시에만
+# GRID_RETURN_GATE_JS 를 통과시켜 데이터를 반환한다. 매번 새 값으로 반환되도록 클릭 시각을
+# 숨김 컬럼(_refresh_nonce / _apply_nonce)에 기록한다. 그리드 하나당 iframe 하나이므로 window 플래그는 그리드별로 분리된다.
+GRID_TOOLBAR_JS = """
+class GridToolbarPanel {
     init(params) {
+        const cfg = __CONFIG__;
+        const api = params.api;
+        this.api = api;
         this.eGui = document.createElement('div');
-        this.eGui.style.padding = '4px 0';
-        const btn = document.createElement('button');
-        btn.innerText = '변경 적용';
-        btn.style.cssText = 'padding:4px 14px;background:#ff4b4b;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;';
-        btn.addEventListener('click', () => {
-            const api = params.api;
+        this.eGui.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap;';
+        const ctrlCss = 'height:28px;padding:0 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;';
+        const btnCss = 'height:28px;padding:0 14px;border-radius:4px;cursor:pointer;font-weight:600;';
+
+        // 총건수 (필터 적용 시 '표시건수 / 전체건수')
+        const count = document.createElement('span');
+        count.style.cssText = 'font-weight:600;margin-right:4px;';
+        this.eGui.appendChild(count);
+        this.updateCount = () => {
+            let total = 0;
+            api.forEachNode(() => { total += 1; });
+            const shown = api.getDisplayedRowCount();
+            count.innerText = shown === total
+                ? '총 ' + total.toLocaleString() + '건'
+                : '총 ' + shown.toLocaleString() + ' / ' + total.toLocaleString() + '건';
+        };
+
+        let select = null;
+        if (cfg.selectField) {
+            const label = document.createElement('span');
+            label.innerText = cfg.selectField;
+            this.eGui.appendChild(label);
+            select = document.createElement('select');
+            select.style.cssText = ctrlCss;
+            ['전체'].concat(cfg.selectOptions).forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v;
+                opt.text = v;
+                select.appendChild(opt);
+            });
+            this.eGui.appendChild(select);
+        }
+
+        let check = null;
+        if (cfg.checkField) {
+            const checkLabel = document.createElement('label');
+            checkLabel.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;';
+            check = document.createElement('input');
+            check.type = 'checkbox';
+            checkLabel.appendChild(check);
+            checkLabel.appendChild(document.createTextNode(cfg.checkLabel));
+            this.eGui.appendChild(checkLabel);
+        }
+
+        const search = document.createElement('input');
+        search.type = 'text';
+        search.placeholder = cfg.searchField + ' 검색';
+        search.style.cssText = ctrlCss + 'width:150px;';
+        this.eGui.appendChild(search);
+
+        const applyFilter = () => {
+            const model = {};
+            if (select && select.value !== '전체') {
+                model[cfg.selectField] = {filterType: 'text', type: 'equals', filter: select.value};
+            }
+            if (check && check.checked) {
+                model[cfg.checkField] = {filterType: 'number', type: 'greaterThan', filter: 0};
+            }
+            const keyword = search.value.trim();
+            if (keyword) {
+                model[cfg.searchField] = {filterType: 'text', type: 'contains', filter: keyword};
+            }
+            api.setFilterModel(Object.keys(model).length ? model : null);
+        };
+        if (select) { select.addEventListener('change', applyFilter); }
+        if (check) { check.addEventListener('change', applyFilter); }
+        search.addEventListener('input', applyFilter);
+
+        // 클릭 시각을 숨김 컬럼에 기록하고 filterChanged 를 발생시켜 Streamlit 으로 1회 반환
+        const requestReturn = (nonceField) => {
             api.stopEditing();
             let first = null;
             api.forEachNode(n => { if (!first) { first = n; } });
-            if (first) { first.setDataValue('_apply_nonce', Date.now()); }
+            if (first) { first.setDataValue(nonceField, Date.now()); }
+            window.__gridReturnRequested = true;
             api.onFilterChanged();
+        };
+
+        const refresh = document.createElement('button');
+        refresh.innerText = '새로고침';
+        refresh.style.cssText = btnCss + 'background:#f0f2f6;color:#31333f;border:1px solid #ccc;';
+        refresh.addEventListener('click', () => {
+            if (select) { select.value = '전체'; }
+            if (check) { check.checked = false; }
+            search.value = '';
+            api.setFilterModel(null);
+            requestReturn('_refresh_nonce');
         });
-        this.eGui.appendChild(btn);
+        this.eGui.appendChild(refresh);
+
+        if (cfg.applyButton) {
+            const apply = document.createElement('button');
+            apply.innerText = '변경 적용';
+            apply.style.cssText = btnCss + 'background:#ff4b4b;color:#fff;border:none;';
+            apply.addEventListener('click', () => requestReturn('_apply_nonce'));
+            this.eGui.appendChild(apply);
+        }
+
+        this.onModelUpdated = () => this.updateCount();
+        api.addEventListener('modelUpdated', this.onModelUpdated);
+        this.updateCount();
     }
     getGui() { return this.eGui; }
+    destroy() { this.api.removeEventListener('modelUpdated', this.onModelUpdated); }
+}
+"""
+
+# 툴바의 새로고침/[변경 적용] 클릭으로 발생한 filterChanged 만 Streamlit 으로 반환 (검색·콤보 필터 변경은 차단)
+GRID_RETURN_GATE_JS = JsCode("""
+function(p) {
+    if (window.__gridReturnRequested) {
+        window.__gridReturnRequested = false;
+        return true;
+    }
+    return false;
 }
 """)
+
+
+def configure_grid_toolbar(gb, search_field='종목명', select_field=None, select_options=None,
+                           check_field=None, check_label=None, apply_button=False):
+    """그리드 하단 상태바에 툴바를 붙인다. 데이터프레임에 '_refresh_nonce' (apply_button 이면 '_apply_nonce'도) 컬럼이 있어야 한다.
+    check_field 를 주면 check_label 체크박스가 추가되고, 체크 시 check_field(숫자 컬럼) > 0 인 행만 표시한다.
+    AgGrid 호출 시 update_on=['filterChanged'], should_grid_return=GRID_RETURN_GATE_JS, server_sync_strategy='server_wins' 와 함께 사용."""
+    config = json.dumps({
+        'searchField': search_field,
+        'selectField': select_field,
+        'selectOptions': list(select_options or []),
+        'checkField': check_field,
+        'checkLabel': check_label or check_field,
+        'applyButton': apply_button,
+    }, ensure_ascii=False)
+    gb.configure_column('_refresh_nonce', hide=True)
+    if apply_button:
+        gb.configure_column('_apply_nonce', hide=True)
+    # 엔터프라이즈 모듈 사용 시 기본 필터가 Set 필터이므로, 툴바가 쓰는 컬럼은 텍스트 필터로 지정
+    for field in (search_field, select_field):
+        if field:
+            gb.configure_column(field, filter='agTextColumnFilter')
+    if check_field:
+        gb.configure_column(check_field, filter='agNumberColumnFilter')
+    gb.configure_grid_options(statusBar={'statusPanels': [
+        {'statusPanel': JsCode(GRID_TOOLBAR_JS.replace('__CONFIG__', config)), 'align': 'left'},
+    ]})
 
 
 def is_new_apply_request(edited_df, state_key):
@@ -937,11 +1068,10 @@ else:
             df0[df0['코드'] == ''],
         ]).reset_index(drop=True)
         df_display['_apply_nonce'] = 0.0
+        df_display['_refresh_nonce'] = 0.0
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
-        gb.configure_column('_apply_nonce', hide=True)
-        gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': APPLY_EDITS_PANEL_JS, 'align': 'left'}]})
         # 페이지당 20개 표시
         gb.configure_pagination(enabled=True, paginationPageSize=20)
         gb.configure_grid_options(domLayout='normal')
@@ -1022,6 +1152,8 @@ else:
             else:
                 gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js)
 
+        configure_grid_toolbar(gb, select_field='매매계획', select_options=list(plan_values), apply_button=True)
+
         grid_options = gb.build()
 
         if 'price_apply_msg' in st.session_state:
@@ -1038,7 +1170,10 @@ else:
             allow_unsafe_jscode=True,
             use_container_width=True,
             update_mode=GridUpdateMode.NO_UPDATE,
-            update_on=['filterChanged'],     # [변경 적용] 버튼이 발생시키는 이벤트에서만 값 반환
+            update_on=['filterChanged'],          # 툴바 새로고침/[변경 적용] 클릭 시에만 반환
+            should_grid_return=GRID_RETURN_GATE_JS,
+            server_sync_strategy='server_wins',  # 새로고침 시 서버 데이터로 갱신
+            data_return_mode='AS_INPUT',         # 검색으로 가려진 행의 편집값도 반환
             enable_enterprise_modules=True,  # 엑셀 다운로드, 상태바 버튼 위해 필요
             excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
             key=f"total_grid_{acct_no}",
@@ -1620,6 +1755,7 @@ else:
     m3.metric("실현손익 합계", f"{df06['실현손익'].sum():,.0f}원")
 
     df_display = df06.copy().reset_index(drop=True)
+    df_display['_refresh_nonce'] = 0.0
 
     # Grid 옵션 생성
     gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -1663,6 +1799,8 @@ else:
         else:
             gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js, width=width)
 
+    configure_grid_toolbar(gb)
+
     grid_options = gb.build()
 
     AgGrid(
@@ -1672,8 +1810,12 @@ else:
         allow_unsafe_jscode=True,
         use_container_width=True,
         update_mode=GridUpdateMode.NO_UPDATE,
+        update_on=['filterChanged'],          # 툴바 새로고침/[변경 적용] 클릭 시에만 반환
+        should_grid_return=GRID_RETURN_GATE_JS,
+        server_sync_strategy='server_wins',  # 새로고침 시 서버 데이터로 갱신
         enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-        excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+        excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
+        key=f"position_grid_{acct_no}",
     )
 
 # 첫 매도 손익 조회 (조회 창 안에서 최초 매수로 시작된 포지션의 진입 후 첫 번째 매도 체결 기준, 전량청산 여부 무관)
@@ -1786,6 +1928,7 @@ else:
               f"평균 수익률 {fs_avg_win_rt:+.2f}% / 손실률 {fs_avg_loss_rt:+.2f}%", delta_color="off")
 
     df_display = df07.copy().reset_index(drop=True)
+    df_display['_refresh_nonce'] = 0.0
 
     gb = GridOptionsBuilder.from_dataframe(df_display)
     gb.configure_pagination(enabled=True, paginationPageSize=20)
@@ -1818,6 +1961,8 @@ else:
         else:
             gb.configure_column(col, type=['numericColumn'], cellRenderer=fs_number_format_js, width=width)
 
+    configure_grid_toolbar(gb)
+
     AgGrid(
         df_display,
         gridOptions=gb.build(),
@@ -1825,6 +1970,9 @@ else:
         allow_unsafe_jscode=True,
         use_container_width=True,
         update_mode=GridUpdateMode.NO_UPDATE,
+        update_on=['filterChanged'],          # 툴바 새로고침/[변경 적용] 클릭 시에만 반환
+        should_grid_return=GRID_RETURN_GATE_JS,
+        server_sync_strategy='server_wins',  # 새로고침 시 서버 데이터로 갱신
         enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
         excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
         key=f"first_sell_grid_{acct_no}",
@@ -1872,23 +2020,17 @@ else:
         # Streamlit 앱 구성
         st.title("일별 주문체결 조회")
 
-        # 주문유형 필터 ('전체' 선택 시 전체 주문유형)
+        # 조회 대상 주문유형 (그리드 툴바의 주문유형 콤보에서 선택, '전체' 는 아래 주문유형 전체)
         all_types = df4['주문유형'].unique()
         주문유형리스트 = [t for t in all_types if t in ('현금매수', '현금매도', '매수정정*', '매도정정*')]
-        선택주문유형 = st.selectbox("주문유형을 선택하세요", ['전체'] + 주문유형리스트, key='kis_order_type')
-        선택주문유형목록 = 주문유형리스트 if 선택주문유형 == '전체' else [선택주문유형]
 
-        # 체결대상: 체결수량이 존재하는 주문만 조회
-        체결대상 = st.checkbox("체결대상", key='kis_ccld_only')
-
-        선택주문유형_df = df4[df4['주문유형'].isin(선택주문유형목록)].copy()
-        if 체결대상:
-            선택주문유형_df = 선택주문유형_df[선택주문유형_df['체결수량'] > 0]
+        선택주문유형_df = df4[df4['주문유형'].isin(주문유형리스트)].copy()
 
         선택주문유형_df['주문일자'] = pd.to_datetime(선택주문유형_df['주문일자'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
         선택주문유형_df['주문시각'] = pd.to_datetime(선택주문유형_df['주문시각'], format='%H%M%S').dt.strftime('%H:%M:%S')
 
         df_display = 선택주문유형_df.sort_values(by=['주문일자', '주문시각'], ascending=False).copy().reset_index(drop=True)
+        df_display['_refresh_nonce'] = 0.0
 
         # Grid 옵션 생성
         gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -1927,6 +2069,10 @@ else:
         for col in ['주문단가', '주문수량', '체결단가', '체결수량', '잔여수량', '체결금액']:
             gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js)
 
+        # 체결대상 체크 시 체결수량이 존재하는 주문만 표시
+        configure_grid_toolbar(gb, select_field='주문유형', select_options=주문유형리스트,
+                               check_field='체결수량', check_label='체결대상')
+
         grid_options = gb.build()
 
         # AgGrid를 통해 데이터 출력
@@ -1937,8 +2083,12 @@ else:
             allow_unsafe_jscode=True,
             use_container_width=True,
             update_mode=GridUpdateMode.NO_UPDATE,
+            update_on=['filterChanged'],          # 툴바 새로고침/[변경 적용] 클릭 시에만 반환
+            should_grid_return=GRID_RETURN_GATE_JS,
+            server_sync_strategy='server_wins',  # 새로고침 시 서버 데이터로 갱신
             enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
-            excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
+            excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
+            key=f"order_grid_{acct_no}",
         )
 
 reserce_strt_dt = datetime.now().strftime("%Y%m%d")
