@@ -8,3 +8,4 @@ plotly==6.9.0
 websockets==16.1.1
 python-dateutil==2.9.0.post0
 pykrx==1.2.8
+starlette>=0.46.0
