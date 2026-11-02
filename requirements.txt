@@ -7,4 +7,4 @@ altair==6.2.2
 plotly==6.9.0
 websockets==16.1.1
 python-dateutil==2.9.0.post0
-pykrx==1.2.4
+pykrx==1.2.8
