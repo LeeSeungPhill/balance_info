@@ -1,0 +1,10 @@
+psycopg2-binary==2.9.12
+requests==2.34.2
+pandas==3.0.3
+streamlit==1.59.2
+streamlit-aggrid==1.2.1.post2
+altair==6.2.2
+plotly==6.9.0
+websockets==16.1.1
+python-dateutil==2.9.0.post0
+pykrx==1.2.4
