@@ -13,7 +13,14 @@ from plotly.subplots import make_subplots
 conn_string = "dbname='fund_risk_mng' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
 
 # DB 연결
+# 이 스크립트는 universe_balance_info.py 에서 runpy 로 매 재실행마다 수행되며, 연결을 닫지 않으면
+# 'idle in transaction' 상태로 남아 누적된다. st.rerun() 등으로 중간에 끝난 이전 실행의 연결은 여기서 닫고,
+# 정상 종료 시에는 스크립트 끝에서 닫는다.
+prev_conn = st.session_state.pop('trading_note_conn', None)
+if prev_conn is not None and not prev_conn.closed:
+    prev_conn.close()
 conn = db.connect(conn_string)
+st.session_state['trading_note_conn'] = conn
 
 # 편집 가능한 AG-Grid 하단 상태바의 [변경 적용] 버튼.
 # 셀 편집만으로는 Streamlit 재실행이 일어나지 않도록 update_on=['filterChanged'] 만 사용하고,
@@ -351,7 +358,13 @@ def note_targets(acct_no, note_dt):
     cur02.close()
 
     # 체결 → 보유 → 관심 순으로 우선하여 종목코드(+종목명) 기준 조합 (항목별 첫 번째 유효값 사용)
-    df = pd.concat([df_complete, df_balance, df_interest], ignore_index=True)
+    # 빈 DataFrame 은 제외하고 조합 (빈/전체 NA DataFrame 포함 시 pandas FutureWarning 발생)
+    # (제외된 DataFrame 의 컬럼도 유지되도록 reindex)
+    target_cols = ['code', 'name', 'buy_price', 'buy_qty', 'sell_price', 'sell_qty', '구분']
+    frames = [f for f in (df_complete, df_balance, df_interest) if not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=target_cols)
+    df = pd.concat(frames, ignore_index=True).reindex(columns=target_cols)
     grouped = df.groupby(['code', 'name'], sort=False)
     df = grouped[['buy_price', 'buy_qty', 'sell_price', 'sell_qty']].first()
     df['구분'] = grouped['구분'].agg(lambda s: '/'.join(dict.fromkeys(s)))
@@ -951,3 +964,7 @@ else:
             cur_upd.close()
         if 'interest_apply_msg' in st.session_state:
             st.rerun()
+
+# 정상 종료 시 DB 연결 닫기 (st.rerun() 으로 중간에 끝난 경우는 다음 실행 시작 시 닫음)
+conn.close()
+st.session_state.pop('trading_note_conn', None)

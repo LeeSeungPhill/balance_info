@@ -48,7 +48,13 @@ def is_new_apply_request(edited_df, state_key):
 # conn_string = "dbname='universe' host='localhost' port='5432' user='postgres' password='asdf1234'"
 conn_string = "dbname='universe' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
 # DB 연결
+# 이 스크립트는 universe_balance_info.py 에서 runpy 로 매 재실행마다 수행되므로 연결을 직접 닫는다.
+# st.rerun() 등으로 중간에 끝난 이전 실행의 연결은 여기서 닫고, 정상 종료 시에는 스크립트 끝에서 닫는다.
+prev_conn = st.session_state.pop('bit_balance_conn', None)
+if prev_conn is not None and not prev_conn.closed:
+    prev_conn.close()
 conn = db.connect(conn_string)
+st.session_state['bit_balance_conn'] = conn
 
 market = ['UPBIT', 'BITHUMB']
 my_choice1 = st.selectbox('시장을 선택하세요', market)   
@@ -668,3 +674,7 @@ else:
             excel_export_mode='xlsx'         # 엑셀(xlsx)로 다운로드
         )   
 
+
+# 정상 종료 시 DB 연결 닫기 (st.rerun() 으로 중간에 끝난 경우는 다음 실행 시작 시 닫음)
+conn.close()
+st.session_state.pop('bit_balance_conn', None)
