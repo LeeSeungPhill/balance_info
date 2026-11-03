@@ -41,6 +41,157 @@ class ApplyEditsPanel {
 """)
 
 
+# AG-Grid 상태바의 총건수 + 콤보 조건 + 종목명 검색 + [새로고침] (simul.html 종목검색 방식).
+# 조건은 그리드(iframe) 안의 window.__gridSearch 에 두고 외부 필터로 그리드 안에서 행을 거른다.
+# 그리드가 다시 그려져도 유지되도록 sessionStorage(그리드별 key)에 보관한다.
+# 조건 변경도 filterChanged 를 발생시켜 Streamlit 이 재실행되므로 검색어는 입력 후 0.3초 뒤에 한 번만 적용.
+GRID_SEARCH_PANEL_JS = """
+class GridSearchPanel {
+    init(params) {
+        const cfg = __CONFIG__;
+        const api = params.api;
+        this.api = api;
+        if (window.__gridSearch === undefined) {
+            try { window.__gridSearch = JSON.parse(sessionStorage.getItem(cfg.key) || '{}'); } catch (e) { window.__gridSearch = {}; }
+        }
+        const state = window.__gridSearch;
+        state.sel = state.sel || {};
+        const save = () => { try { sessionStorage.setItem(cfg.key, JSON.stringify(state)); } catch (e) {} };
+        const inputCss = 'padding:4px 8px;border:1.5px solid #e0e0e0;border-radius:6px;font-size:.85rem;';
+
+        this.eGui = document.createElement('div');
+        this.eGui.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap;';
+        const count = document.createElement('span');
+        count.style.cssText = 'font-size:.85rem;color:#555;';
+        this.eGui.appendChild(count);
+        // 콤보 조건 항목별 건수 (조건 적용 후 남은 행 기준)
+        const stats = document.createElement('span');
+        stats.style.cssText = 'font-size:.8rem;color:#777;';
+        this.eGui.appendChild(stats);
+        const optionHit = (sel, o, d) => o.field ? String(d[o.field] || '').trim() !== ''
+                                                 : String(d[sel.field] || '') === o.value;
+
+        // 콤보 조건 (첫 항목 = 전체)
+        cfg.selects.forEach(sel => {
+            const box = document.createElement('select');
+            box.style.cssText = inputCss + 'background:#fff;';
+            box.title = sel.label;
+            [{value: '', text: sel.label + ' 전체'}].concat(sel.options).forEach(o => {
+                const opt = document.createElement('option');
+                opt.value = o.value;
+                opt.text = o.text;
+                box.appendChild(opt);
+            });
+            box.value = state.sel[sel.id] || '';
+            box.addEventListener('change', () => {
+                state.sel[sel.id] = box.value;
+                save();
+                api.onFilterChanged();
+            });
+            this.eGui.appendChild(box);
+        });
+
+        // 종목명 검색 (다시 그려질 때는 외부 필터가 저장된 조건을 바로 읽으므로 onFilterChanged 를 부르지 않음 -
+        //  부르면 Streamlit 이 한 번 더 재실행되어 [변경 완료] 메시지가 사라짐)
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = '종목명 검색';
+        input.style.cssText = inputCss + 'width:140px;';
+        input.value = state.name || '';
+        let timer = null;
+        input.addEventListener('input', () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                state.name = input.value;
+                save();
+                api.onFilterChanged();
+            }, 300);
+        });
+        this.eGui.appendChild(input);
+
+        // 건수는 조건 적용 후 남은 행 수, 조건이 있으면 전체 건수도 함께 표시
+        this.update = () => {
+            let shown = 0, total = 0;
+            const tally = cfg.selects.map(sel => sel.options.map(() => 0));
+            api.forEachNode(() => { total += 1; });
+            api.forEachNodeAfterFilter(n => {
+                shown += 1;
+                const d = n.data || {};
+                cfg.selects.forEach((sel, i) => sel.options.forEach((o, j) => {
+                    if (optionHit(sel, o, d)) { tally[i][j] += 1; }
+                }));
+            });
+            count.innerHTML = shown === total ? '총 <b>' + total.toLocaleString() + '</b>건'
+                : '총 <b>' + shown.toLocaleString() + '</b>건 (전체 ' + total.toLocaleString() + '건)';
+            stats.innerHTML = cfg.selects.map((sel, i) => sel.label + ': '
+                + sel.options.map((o, j) => o.text + ' <b>' + tally[i][j].toLocaleString() + '</b>').join(' · ')).join(' &nbsp;|&nbsp; ');
+        };
+        api.addEventListener('modelUpdated', this.update);
+        setTimeout(this.update, 0);
+
+        // [새로고침]: 숨김 컬럼(_refresh_nonce)에 클릭 시각 기록 + filterChanged 로 요청 →
+        // Python 에서 DB 재조회 후 그리드를 새로 그림 (적용하지 않은 편집값은 버려짐, 조건은 유지)
+        const refresh = document.createElement('button');
+        refresh.innerText = '새로고침';
+        refresh.style.cssText = 'background:none;border:1px solid #e0e0e0;color:#888;font-size:.8rem;padding:3px 10px;'
+            + 'border-radius:6px;cursor:pointer;font-weight:500;';
+        refresh.addEventListener('mouseenter', () => { refresh.style.background = '#f0f2f5'; refresh.style.color = '#555'; });
+        refresh.addEventListener('mouseleave', () => { refresh.style.background = 'none'; refresh.style.color = '#888'; });
+        refresh.addEventListener('click', () => {
+            api.stopEditing(true);
+            let first = null;
+            api.forEachNode(n => { if (!first) { first = n; } });
+            if (first) { first.setDataValue('_refresh_nonce', Date.now()); }
+            api.onFilterChanged();
+        });
+        this.eGui.appendChild(refresh);
+    }
+    getGui() { return this.eGui; }
+    destroy() { this.api.removeEventListener('modelUpdated', this.update); }
+}
+"""
+GRID_SEARCH_PRESENT_JS = """
+function() {
+    const cfg = __CONFIG__;
+    if (window.__gridSearch === undefined) {   // 그리드가 새로 그려진 경우 저장된 조건으로 시작
+        try { window.__gridSearch = JSON.parse(sessionStorage.getItem(cfg.key) || '{}'); } catch (e) { window.__gridSearch = {}; }
+    }
+    const s = window.__gridSearch;
+    return !!((s.name || '').trim() || Object.values(s.sel || {}).some(v => v));
+}
+"""
+# 콤보 조건: 옵션에 field 가 있으면 그 컬럼에 입력 내용이 있는지, 없으면 sel.field 컬럼 값이 옵션 값과 같은지 비교
+GRID_SEARCH_PASS_JS = """
+function(node) {
+    const cfg = __CONFIG__;
+    const s = window.__gridSearch || {};
+    const d = node.data || {};
+    const name = (s.name || '').trim().toLowerCase();
+    if (name && !String(d['종목명'] || '').toLowerCase().includes(name)) { return false; }
+    for (const sel of cfg.selects) {
+        const v = (s.sel || {})[sel.id];
+        if (!v) { continue; }
+        const opt = sel.options.find(o => o.value === v);
+        if (!opt) { continue; }
+        if (opt.field) {
+            if (!String(d[opt.field] || '').trim()) { return false; }
+        } else if (String(d[sel.field] || '') !== v) { return false; }
+    }
+    return true;
+}
+"""
+
+
+def grid_search_options(storage_key, selects=()):
+    """GRID_SEARCH_PANEL_JS 상태바 패널 + 외부 필터 gridOptions 생성 (storage_key: 그리드별 sessionStorage key)"""
+    config = json.dumps({'key': storage_key, 'selects': list(selects)}, ensure_ascii=False)
+    return {
+        'statusPanel': JsCode(GRID_SEARCH_PANEL_JS.replace('__CONFIG__', config)),
+        'isExternalFilterPresent': JsCode(GRID_SEARCH_PRESENT_JS.replace('__CONFIG__', config)),
+        'doesExternalFilterPass': JsCode(GRID_SEARCH_PASS_JS.replace('__CONFIG__', config)),
+    }
+
+
 def is_new_apply_request(edited_df, state_key):
     """그리드의 [변경 적용] 버튼 클릭으로 들어온, 아직 처리하지 않은 요청인지 판단 (클릭 시각 nonce 비교)"""
     if edited_df.empty or '_apply_nonce' not in edited_df.columns:
@@ -324,22 +475,11 @@ st.header("매매노트 조회")
 
 acct_no = account(my_choice)
 
-# 작성기간은 시작일~종료일이 모두 보이도록 폭을 넓게 배정
-c1, c3, c4, c5 = st.columns([1.6, 1, 1, 1.4])
 # 작성기간: 하나의 캘린더에서 시작일/종료일 선택 (시작일만 선택한 상태면 그 하루로 조회)
+# 작성항목/매매대응 결과/종목명 조건은 그리드 하단 상태바에서 그리드 안에서 처리
+c1, _ = st.columns([1.6, 3.4])
 note_period = c1.date_input("작성기간", (datetime.now() - timedelta(days=30), datetime.now()), format="YYYY-MM-DD")
 strt_date, end_date = (note_period[0], note_period[-1]) if note_period else (datetime.now(), datetime.now())
-# 작성항목 조건: 단건 선택, 선택한 항목에 입력 내용이 있는 노트 (매수근거→[매수], 매도근거→[매도], 개선할 점→[개선], 잘한점→[성취])
-note_item_cols = {'매수': 'buy_reason', '매도': 'sell_reason', '개선': 'improve_point', '성취': 'good_point'}
-item_filter = c3.selectbox("작성항목", [None] + list(note_item_cols),
-                           format_func=lambda t: '전체' if t is None else f"{t}")
-item_cond = f"COALESCE(TRIM({note_item_cols[item_filter]}), '') <> ''" if item_filter else 'TRUE'
-# 매매대응 결과(principle_yn) 조건: 단건 선택, 전체 선택 시 조건 없음
-result_choice = c4.selectbox("매매대응 결과", [None] + list(PRINCIPLES),
-                             format_func=lambda c: '전체' if c is None else PRINCIPLES[c])
-result_filter = [result_choice] if result_choice else []
-# 종목명 조건: 입력한 글자가 포함된 종목 (대소문자 무시, 비우면 전체)
-name_filter = c5.text_input("종목명", placeholder="전체").strip()
 
 cur05 = conn.cursor()
 cur05.execute("""
@@ -349,15 +489,9 @@ cur05.execute("""
            acct_no
     FROM public.trading_note A
     WHERE note_dt BETWEEN %(strt_dt)s AND %(end_dt)s
-      AND (%(no_result_filter)s OR principle_yn = ANY(%(result_filter)s))
-      AND acct_no = %(acct_no)s
-      AND name ILIKE %(name_filter)s
-      AND (""" + item_cond + """)
+      AND acct_no = %(acct_no)s   -- 쿼리 파라미터로 전달받은 닉네임의 계좌
     ORDER BY note_dt DESC, name
-""", {'strt_dt': strt_date.strftime("%Y%m%d"), 'end_dt': end_date.strftime("%Y%m%d"),
-      'no_result_filter': not result_filter, 'result_filter': result_filter,
-      'acct_no': acct_no,   # 쿼리 파라미터로 전달받은 닉네임의 계좌
-      'name_filter': f"%{name_filter}%"})
+""", {'strt_dt': strt_date.strftime("%Y%m%d"), 'end_dt': end_date.strftime("%Y%m%d"), 'acct_no': acct_no})
 df_notes = pd.DataFrame(cur05.fetchall(), columns=['작성일자', '종목코드', '종목명', '매수가', '매수량', '매도가', '매도량', '방향흐름',
                                                    '매수근거', '매도근거', '매매대응 결과', '잘한점', '개선할 점', '닉네임', '계좌번호'])
 cur05.close()
@@ -371,12 +505,27 @@ else:
     df_notes['매매대응 결과'] = df_notes['매매대응 결과'].map(lambda c: PRINCIPLES.get(c, ''))
     df_notes['_chart_click'] = 0.0
     df_notes['_load_click'] = 0.0
+    df_notes['_refresh_nonce'] = 0.0
 
     gb = GridOptionsBuilder.from_dataframe(df_notes)
     gb.configure_column('종목코드', hide=True)   # 차트 조회/노트 불러오기용
     gb.configure_column('계좌번호', hide=True)   # 노트 불러오기용
     gb.configure_column('_chart_click', hide=True)
     gb.configure_column('_load_click', hide=True)
+    gb.configure_column('_refresh_nonce', hide=True)
+
+    # 상태바: 총건수 + 작성항목/매매대응 결과 콤보 + 종목명 검색 + [새로고침]
+    # 작성항목: 매수근거→매수, 매도근거→매도, 개선할 점→개선, 잘한점→성취 에 입력 내용이 있는 노트
+    notes_search = grid_search_options('notesGridSearch', [
+        {'id': 'item', 'label': '작성항목',
+         'options': [{'value': t, 'text': t, 'field': f}
+                     for t, f in [('매수', '매수근거'), ('매도', '매도근거'), ('개선', '개선할 점'), ('성취', '잘한점')]]},
+        {'id': 'result', 'label': '매매대응 결과', 'field': '매매대응 결과',
+         'options': [{'value': v, 'text': v} for v in PRINCIPLES.values()]},
+    ])
+    gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': notes_search['statusPanel'], 'align': 'right'}]},
+                              isExternalFilterPresent=notes_search['isExternalFilterPresent'],
+                              doesExternalFilterPass=notes_search['doesExternalFilterPass'])
 
     # 행 클릭(종목명 제외 - 종목명은 차트 팝업) 시 클릭 시각을 _load_click 에 기록하고 그리드 데이터를 반환해
     # 해당 노트를 매매노트 작성 영역에 불러온다. 클릭한 행은 선택 표시.
@@ -426,13 +575,19 @@ else:
         allow_unsafe_jscode=True,
         use_container_width=True,
         update_mode=GridUpdateMode.NO_UPDATE,
-        update_on=['filterChanged'],     # 종목명 클릭(차트 팝업)/행 클릭(노트 불러오기) 시 값 반환
-        enable_enterprise_modules=True,  # 엑셀 다운로드 위해 필요
+        update_on=['filterChanged'],     # 종목명 클릭(차트 팝업)/행 클릭(노트 불러오기)/조건 변경/새로고침 시 값 반환
+        enable_enterprise_modules=True,  # 엑셀 다운로드/상태바 위해 필요
         excel_export_mode='xlsx',        # 엑셀(xlsx)로 다운로드
-        key=f"notes_grid_{acct_no}",
+        # 새로고침 시 버전을 올려 그리드를 새로 그림
+        key=f"notes_grid_{acct_no}_{st.session_state.get('notes_grid_ver', 0)}",
     )
 
     notes_grid_df = pd.DataFrame(notes_response['data'])
+
+    # [새로고침] 클릭으로 들어온 새 요청이면 DB 재조회 + 그리드 새로 그리기
+    if new_grid_click(notes_grid_df, '_refresh_nonce', f"notes_refresh_nonce_{acct_no}") is not None:
+        st.session_state['notes_grid_ver'] = st.session_state.get('notes_grid_ver', 0) + 1
+        st.rerun()
 
     # 종목명 클릭으로 들어온 새 요청이면 차트 팝업
     chart_target = new_chart_click(notes_grid_df, f"notes_chart_nonce_{acct_no}", '종목코드', '종목명')
@@ -611,15 +766,22 @@ else:
     df_interest['삭제'] = False
     df_interest['_apply_nonce'] = 0.0
     df_interest['_chart_click'] = 0.0
+    df_interest['_refresh_nonce'] = 0.0
 
     # 그리드 컬럼 순서: 종목명 → 가격 항목 → 삭제 → 관심유형 (코드/_ 컬럼은 숨김)
     df_interest = df_interest[['코드', '종목명'] + list(interest_price_cols)
-                              + ['삭제', '관심유형', '_apply_nonce', '_chart_click']]
+                              + ['삭제', '관심유형', '_apply_nonce', '_chart_click', '_refresh_nonce']]
 
     gb = GridOptionsBuilder.from_dataframe(df_interest)
     gb.configure_column('_apply_nonce', hide=True)
     gb.configure_column('_chart_click', hide=True)
-    gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': APPLY_EDITS_PANEL_JS, 'align': 'left'}]})
+    gb.configure_column('_refresh_nonce', hide=True)
+    # 상태바: 왼쪽 [변경 적용], 오른쪽 총건수 + 종목명 검색 + [새로고침] (검색은 그리드 안에서 외부 필터로 처리)
+    interest_search = grid_search_options('interestGridSearch')
+    gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': APPLY_EDITS_PANEL_JS, 'align': 'left'},
+                                                          {'statusPanel': interest_search['statusPanel'], 'align': 'right'}]},
+                              isExternalFilterPresent=interest_search['isExternalFilterPresent'],
+                              doesExternalFilterPass=interest_search['doesExternalFilterPass'])
     gb.configure_pagination(enabled=True, paginationPageSize=20)
 
     # 컬럼 폭을 데이터 크기에 맞춤 (첫 렌더링/페이지 이동 시)
@@ -704,12 +866,19 @@ else:
         allow_unsafe_jscode=True,
         use_container_width=True,
         update_mode=GridUpdateMode.NO_UPDATE,
-        update_on=['filterChanged'],     # [변경 적용] 버튼/차트 클릭이 발생시키는 이벤트에서만 값 반환
+        update_on=['filterChanged'],     # [변경 적용] 버튼/차트 클릭/종목명 검색이 발생시키는 이벤트에서만 값 반환
+        data_return_mode='AS_INPUT',     # 종목명 검색으로 숨겨진 행의 편집값도 [변경 적용]에 포함되도록 전체 행 반환
         enable_enterprise_modules=True,  # 상태바 버튼 위해 필요
-        key=f"interest_grid_{acct_no}",
+        # 새로고침 시 버전을 올려 그리드를 새로 그림 (적용하지 않은 편집값 초기화)
+        key=f"interest_grid_{acct_no}_{st.session_state.get('interest_grid_ver', 0)}",
     )
 
     edited_df = pd.DataFrame(grid_response['data'])
+
+    # [새로고침] 클릭으로 들어온 새 요청이면 DB 재조회 + 그리드 새로 그리기
+    if new_grid_click(edited_df, '_refresh_nonce', f"interest_refresh_nonce_{acct_no}") is not None:
+        st.session_state['interest_grid_ver'] = st.session_state.get('interest_grid_ver', 0) + 1
+        st.rerun()
 
     # 코드/종목명 클릭으로 들어온 새 요청이면 차트 팝업
     chart_target = new_chart_click(edited_df, f"interest_chart_nonce_{acct_no}", '코드', '종목명')
