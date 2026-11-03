@@ -26,6 +26,7 @@ MENU_SCRIPTS = {
     'BIT': 'bit_balance_info.py',
     'KIS': 'kis_balance_info.py',
     '노트': 'trading_note.py',
+    '모의': 'mock_trading_tracker.py',
 }
 # 닉네임별로 노출할 메뉴 제한 (지정되지 않은 닉네임은 전체 메뉴)
 MENU_BY_NICKNAME = {
