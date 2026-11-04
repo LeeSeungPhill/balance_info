@@ -1061,9 +1061,9 @@ else:
         # 지지가손익금액: 지지가 도달 시 종목별 손익 ((지지가 - 매입단가) * 매입수량, 트레이딩풀 기준, 조회용)
         df0['지지가손익금액'] = df0['코드'].map(lambda c: int(price_map[c][5] or 0) if c in price_map else 0.0)
 
-        # 매매계획 (trading_plan): 일반=NULL, 투자='i', 홀딩='h'
+        # 매매계획 (trading_plan): 일반=NULL, 투자='i', 홀딩='h', 'e': '정리'
         # 트레이딩풀(stockBalance_stock_balance)에 없는 종목/현금은 '' 로 표시하고 편집 불가
-        plan_labels = {None: '일반', 'i': '투자', 'h': '홀딩'}
+        plan_labels = {None: '일반', 'i': '투자', 'h': '홀딩', 'e': '정리'}
         plan_values = {v: k for k, v in plan_labels.items()}
         df0.insert(df0.columns.get_loc('종목명') + 1, '매매계획',
                    df0['코드'].map(lambda c: plan_labels.get(price_map[c][4] or None, price_map[c][4]) if c in price_map else ''))
