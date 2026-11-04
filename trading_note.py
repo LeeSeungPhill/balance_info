@@ -687,10 +687,14 @@ else:
     labels = [(f"{r.name} ({r.code}) [{r.구분}]" if r.code else f"{r.name} [{r.구분}]")
               + (f" {note_tags[(r.code, r.name)]}" if (r.code, r.name) in note_tags else "")
               for r in df_targets.itertuples()]
-    if st.session_state.get(target_key, 0) >= len(labels):
+    # 저장된 선택값이 None(옵션 변경/메뉴 전환 시)이거나 범위를 벗어나면 초기화 → 첫 종목 선택
+    saved_idx = st.session_state.get(target_key)
+    if target_key in st.session_state and not (isinstance(saved_idx, int) and 0 <= saved_idx < len(labels)):
         st.session_state.pop(target_key)
     selected_idx = st.selectbox("종목명을 선택하세요", range(len(labels)), format_func=lambda i: labels[i],
                                 key=target_key)
+    if selected_idx is None:
+        selected_idx = 0
     target = df_targets.iloc[selected_idx]
     code, name = target['code'], target['name']
 
