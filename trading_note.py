@@ -466,6 +466,9 @@ interest_price_cols = {
     '추세하한가': 'trend_low_price',
 }
 
+# 표시 전용 종목 정보 (시장=market, 규모=size, 산업=industry, 시가총액(억)=mktcap)
+interest_info_cols = ['시장', '규모', '산업', '시가총액(억)']
+
 # 관심유형(watch_type): DB 에는 코드(A~D)를 콤마로 연결해 저장(예: 'A,C'), 화면에는 설명 표시
 WATCH_TYPES = {
     'A': '가장 최근 목표가 또는 EPS 수정이 상향',
@@ -762,12 +765,14 @@ st.header("관심종목")
 cur07 = conn.cursor()
 # 선택 계좌의 관심종목
 cur07.execute(f"""
-    SELECT code, name, watch_type, {', '.join(interest_price_cols.values())}
+    SELECT code, name, watch_type, {', '.join(interest_price_cols.values())},
+           market, size, industry, mktcap, main_business
     FROM public."interestItem_interest_item"
     WHERE acct_no = %s AND code NOT IN ('0001', '1001') AND proc_yn = 'Y'
     ORDER BY code
 """, (acct_no,))
-df_interest = pd.DataFrame(cur07.fetchall(), columns=['코드', '종목명', '관심유형'] + list(interest_price_cols))
+df_interest = pd.DataFrame(cur07.fetchall(), columns=['코드', '종목명', '관심유형'] + list(interest_price_cols)
+                           + interest_info_cols + ['주요사업'])
 cur07.close()
 
 if 'interest_apply_msg' in st.session_state:
@@ -780,13 +785,16 @@ else:
         df_interest[col] = pd.to_numeric(df_interest[col], errors='coerce').fillna(0).astype(int)
     # 리스트 컬럼은 Arrow 직렬화 시 그리드에서 JS 배열로 읽히지 않으므로 'A,C' 문자열로 전달
     df_interest['관심유형'] = df_interest['관심유형'].map(lambda v: ','.join(parse_watch_type(v)))
+    # 시가총액은 DB 에 문자열로 저장되어 있어 정렬/천단위 표시를 위해 숫자로 변환
+    df_interest['시가총액(억)'] = pd.to_numeric(df_interest['시가총액(억)'], errors='coerce')
+    df_interest['주요사업'] = df_interest['주요사업'].fillna('')
     df_interest['삭제'] = False
     df_interest['_apply_nonce'] = 0.0
     df_interest['_chart_click'] = 0.0
     df_interest['_refresh_nonce'] = 0.0
 
-    # 그리드 컬럼 순서: 종목명 → 가격 항목 → 삭제 → 관심유형 (코드/_ 컬럼은 숨김)
-    df_interest = df_interest[['코드', '종목명'] + list(interest_price_cols)
+    # 그리드 컬럼 순서: 종목명 → 시장/규모/산업/시가총액 → 주요사업 → 가격 항목 → 삭제 → 관심유형 (코드/_ 컬럼은 숨김)
+    df_interest = df_interest[['코드', '종목명'] + interest_info_cols + ['주요사업'] + list(interest_price_cols)
                               + ['삭제', '관심유형', '_apply_nonce', '_chart_click', '_refresh_nonce']]
 
     gb = GridOptionsBuilder.from_dataframe(df_interest)
@@ -826,6 +834,15 @@ else:
         gb.configure_column(col, type=['numericColumn'], cellRenderer=number_format_js,
                             editable=True, cellEditor='agNumberCellEditor',
                             cellStyle={'backgroundColor': '#fff8e1'})
+
+    # 시장/규모/산업/시가총액: 표시만, 주요사업: 긴 텍스트 팝업 편집
+    for col in interest_info_cols:
+        gb.configure_column(col, editable=False)
+    gb.configure_column('시가총액(억)', type=['numericColumn'], cellRenderer=number_format_js)
+    gb.configure_column('주요사업', editable=True, cellEditor='agLargeTextCellEditor', cellEditorPopup=True,
+                        cellEditorParams={'maxLength': 2000, 'rows': 6, 'cols': 60},
+                        maxWidth=400, wrapText=True, autoHeight=True,
+                        cellStyle={'backgroundColor': '#fff8e1', 'whiteSpace': 'pre-line', 'lineHeight': '1.6'})
 
     # 관심유형: 행 데이터는 'A,C' 문자열, 그리드 안에서만 코드 배열로 변환해 다중 선택
     # (valueGetter: 문자열 → 배열, valueSetter: 선택 배열 → 문자열), 셀/선택목록에는 코드 설명 표시
@@ -871,8 +888,8 @@ else:
 
     grid_options = gb.build()
 
-    st.caption("가격 항목은 셀을 더블클릭해 수정하고, 관심유형은 셀을 클릭해 여러 개를 선택하며, 삭제할 종목은 [삭제]를 체크한 뒤 "
-               "그리드 하단 [변경 적용]을 누르면 가격·관심유형 변경은 모든 계좌의 해당 종목에, 삭제는 선택한 계좌에만 반영됩니다. "
+    st.caption("가격 항목·주요사업은 셀을 더블클릭해 수정하고, 관심유형은 셀을 클릭해 여러 개를 선택하며, 삭제할 종목은 [삭제]를 체크한 뒤 "
+               "그리드 하단 [변경 적용]을 누르면 가격·주요사업·관심유형 변경은 모든 계좌의 해당 종목에, 삭제는 선택한 계좌에만 반영됩니다. "
                "종목명을 클릭하면 차트가 표시됩니다.")
 
     # AgGrid를 통해 데이터 출력 (그리드 하단 [변경 적용] 버튼 클릭 시에만 편집값 반환)
@@ -907,6 +924,7 @@ else:
     price_changes = []   # (코드, 종목명, 항목, DB컬럼, 변경 전, 변경 후)
     deletes = []         # (코드, 종목명)
     watch_changes = []   # (코드, 종목명, 변경 전 코드리스트, 변경 후 코드리스트)
+    business_changes = []   # (코드, 종목명, 변경 후 주요사업)
     if apply_requested and '코드' in edited_df.columns:
         orig_by_code = df_interest.set_index('코드')
         for _, row in edited_df.iterrows():
@@ -920,6 +938,9 @@ else:
             new_watch = parse_watch_type(row.get('관심유형'))
             if new_watch != old_watch:
                 watch_changes.append((code_, row['종목명'], old_watch, new_watch))
+            new_business = '' if row.get('주요사업') is None or pd.isna(row.get('주요사업')) else str(row['주요사업']).strip()
+            if new_business != str(orig_by_code.at[code_, '주요사업']).strip():
+                business_changes.append((code_, row['종목명'], new_business))
             for label, db_col in interest_price_cols.items():
                 try:
                     new_val = int(float(row[label]))
@@ -929,9 +950,9 @@ else:
                 if new_val != old_val:
                     price_changes.append((code_, row['종목명'], label, db_col, old_val, new_val))
 
-    if apply_requested and not price_changes and not deletes and not watch_changes:
+    if apply_requested and not price_changes and not deletes and not watch_changes and not business_changes:
         st.info("변경된 항목이 없습니다.")
-    elif price_changes or deletes or watch_changes:
+    elif price_changes or deletes or watch_changes or business_changes:
         cur_upd = conn.cursor()
         try:
             applied = []
@@ -952,6 +973,14 @@ else:
                 """, (','.join(new_watch) or None, code_))
                 applied.append(f"{name_} 관심유형 {','.join(old_watch) or '없음'} → {','.join(new_watch) or '없음'} "
                                f"({cur_upd.rowcount}개 계좌)")
+            for code_, name_, new_business in business_changes:
+                # 주요사업도 종목 정보이므로 모든 계좌의 해당 종목에 반영 (비우면 NULL)
+                cur_upd.execute("""
+                    UPDATE public."interestItem_interest_item"
+                       SET main_business = %s, last_chg_date = now()
+                     WHERE code = %s AND proc_yn = 'Y'
+                """, (new_business or None, code_))
+                applied.append(f"{name_} 주요사업 변경 ({cur_upd.rowcount}개 계좌)")
             for code_, name_ in deletes:
                 cur_upd.execute("""
                     UPDATE public."interestItem_interest_item"
