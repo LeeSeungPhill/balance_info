@@ -6,6 +6,50 @@ import requests
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from st_aggrid import AgGrid, GridUpdateMode
+from st_aggrid.grid_options_builder import GridOptionsBuilder
+from st_aggrid.shared import JsCode
+
+# 편집 가능한 AG-Grid 하단 상태바의 [변경 적용] 버튼 (bit_balance_info.py 와 같은 방식).
+# 셀 편집만으로는 재실행되지 않도록 update_on=['filterChanged'] 만 사용하고,
+# 버튼 클릭 시 편집 확정 + 숨김 컬럼(_apply_nonce)에 클릭 시각 기록 + filterChanged 발생으로 한 번만 데이터를 반환한다.
+APPLY_EDITS_PANEL_JS = JsCode("""
+class ApplyEditsPanel {
+    init(params) {
+        this.eGui = document.createElement('div');
+        this.eGui.style.padding = '4px 0';
+        const btn = document.createElement('button');
+        btn.innerText = '변경 적용';
+        btn.style.cssText = 'padding:4px 14px;background:#ff4b4b;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;';
+        btn.addEventListener('click', () => {
+            const api = params.api;
+            api.stopEditing();
+            let first = null;
+            api.forEachNode(n => { if (!first) { first = n; } });
+            if (first) { first.setDataValue('_apply_nonce', Date.now()); }
+            api.onFilterChanged();
+        });
+        this.eGui.appendChild(btn);
+    }
+    getGui() { return this.eGui; }
+}
+""")
+
+
+def is_new_apply_request(edited_df, state_key):
+    """그리드의 [변경 적용] 버튼 클릭으로 들어온, 아직 처리하지 않은 요청인지 판단 (클릭 시각 nonce 비교)"""
+    if edited_df.empty or '_apply_nonce' not in edited_df.columns:
+        return False
+    nonce = int(pd.to_numeric(edited_df['_apply_nonce'], errors='coerce').fillna(0).max())
+    if nonce <= 0 or st.session_state.get(state_key) == nonce:
+        return False
+    st.session_state[state_key] = nonce
+    return True
+
+
+# 판단모드(check_mode) 코드 ↔ 콤보박스 표시값 ('' 는 미입력)
+CHECK_MODES = {'S': '잘함 (S)', 'M': '보통 (M)', 'F': '미흡 (F)'}
+CHECK_MODE_CODES = {v: k for k, v in CHECK_MODES.items()}
 
 # PostgreSQL 연결 설정
 conn_string = "dbname='fund_risk_mng' host='192.168.50.81' port='5432' user='postgres' password='asdf1234'"
@@ -214,7 +258,8 @@ def replay(trades, init_cash):
         curve.append((f"{t.slot}{'매수' if t.trade_tp == 'B' else '매도'}", (equity / init_cash - 1) * 100))
         history.append({'id': t.id, 'trade_dt': t.trade_dt, 'trade_tp': t.trade_tp, 'slot': t.slot, 'qty': t.qty,
                         'price': t.price, 'amount': amount, 'realized': realized, 'realized_rt': realized_rt,
-                        'cash': cash, 'reason': t.reason})
+                        'cash': cash, 'reason': t.reason,
+                        'check_mode': t.check_mode, 'result_check': t.result_check})
     return cash, pos, realized_total, pd.DataFrame(history), curve
 
 
@@ -306,10 +351,12 @@ else:
 
     cur05 = conn.cursor()
     cur05.execute("""
-        SELECT id, trade_dt, slot, trade_tp, price, qty, reason FROM public.mock_tracker_trade
-        WHERE tracker_id = %s ORDER BY trade_dt, id
+        SELECT id, trade_dt, slot, trade_tp, price, qty, reason, check_mode, result_check
+          FROM public.mock_tracker_trade
+         WHERE tracker_id = %s ORDER BY trade_dt, id
     """, (tracker_id,))
-    trades = pd.DataFrame(cur05.fetchall(), columns=['id', 'trade_dt', 'slot', 'trade_tp', 'price', 'qty', 'reason'])
+    trades = pd.DataFrame(cur05.fetchall(), columns=['id', 'trade_dt', 'slot', 'trade_tp', 'price', 'qty', 'reason',
+                                                     'check_mode', 'result_check'])
     cur05.execute("SELECT slot, cur_price FROM public.mock_tracker_price WHERE tracker_id = %s", (tracker_id,))
     cur_prices = {s: float(p) for s, p in cur05.fetchall()}
     cur05.close()
@@ -427,22 +474,136 @@ else:
                 st.caption("거래 내역이 없습니다")
             else:
                 df_view = pd.DataFrame({
+                    'id': df_hist['id'].astype(int),
                     '매매일자': df_hist['trade_dt'].map(fmt_dt),
                     '구분': df_hist['trade_tp'].map({'B': 'BUY', 'S': 'SELL'}),
                     '슬롯': df_hist['slot'], '수량': df_hist['qty'], '단가': df_hist['price'],
-                    '거래금액': df_hist['amount'], '실현손익': df_hist['realized'],
-                    '수익률': pd.to_numeric(df_hist['realized_rt']), '잔여현금': df_hist['cash'],
+                    '거래금액': df_hist['amount'],
+                    '실현손익': pd.to_numeric(df_hist['realized']).round(0),
+                    '수익률': pd.to_numeric(df_hist['realized_rt']).round(2), '잔여현금': df_hist['cash'],
                     '사유': df_hist['reason'].fillna(''),
-                }).iloc[::-1]
-                st.dataframe(
-                    df_view.style.format({'수량': '{:,}', '단가': '{:,.0f}', '거래금액': '{:,.0f}',
-                                          '실현손익': lambda v: '—' if pd.isna(v) else f"{v:+,.0f}원",
-                                          '수익률': lambda v: '—' if pd.isna(v) else f"{v:+.2f}%",
-                                          '잔여현금': '{:,.0f}'})
-                    .map(lambda v: f"color: {UP_COLOR if v == 'BUY' else DOWN_COLOR}; font-weight: 700",
-                         subset=['구분'])
-                    .map(pl_color, subset=['실현손익', '수익률']),
-                    hide_index=True, use_container_width=True)
+                    '판단모드': df_hist['check_mode'].map(lambda c: CHECK_MODES.get((c or '').strip(), '')),
+                    '판단결과': df_hist['result_check'].fillna(''),
+                }).iloc[::-1].reset_index(drop=True)
+                df_view['_apply_nonce'] = 0.0
+
+                number_fmt_js = JsCode("""
+                    function(p) { return (p.value === null || p.value === undefined) ? '' :
+                                  Math.round(p.value).toLocaleString(); }
+                """)
+                signed_won_js = JsCode("""
+                    function(p) { if (p.value === null || p.value === undefined || isNaN(p.value)) return '—';
+                                  return (p.value > 0 ? '+' : '') + Math.round(p.value).toLocaleString() + '원'; }
+                """)
+                signed_pct_js = JsCode("""
+                    function(p) { if (p.value === null || p.value === undefined || isNaN(p.value)) return '—';
+                                  return (p.value > 0 ? '+' : '') + p.value.toFixed(2) + '%'; }
+                """)
+                pl_style_js = JsCode(f"""
+                    function(p) {{ if (!p.value) return null;
+                                   return {{color: p.value > 0 ? '{UP_COLOR}' : '{DOWN_COLOR}'}}; }}
+                """)
+                tp_style_js = JsCode(f"""
+                    function(p) {{ return {{color: p.value === 'BUY' ? '{UP_COLOR}' : '{DOWN_COLOR}',
+                                           fontWeight: 700}}; }}
+                """)
+                # 열 폭: 표시 문자열(헤더 포함) 중 가장 긴 것 기준으로 계산해 고정
+                # (거래내역은 탭 안이라 숨겨진 상태에서 그려지면 JS 자동 맞춤이 폭을 재지 못하므로 Python 에서 계산)
+                def text_px(s):
+                    s = str(s).replace('\n', ' ')
+                    return sum(14 if ord(ch) > 0x2E80 else 8 for ch in s)
+
+                def fmt_cell(col, v):
+                    if v is None or (isinstance(v, float) and pd.isna(v)):
+                        return '—'
+                    if col in ('수량', '단가', '거래금액', '잔여현금'):
+                        return f"{v:,.0f}"
+                    if col == '실현손익':
+                        return f"{v:+,.0f}원"
+                    if col == '수익률':
+                        return f"{v:+.2f}%"
+                    return str(v)
+
+                col_widths = {
+                    col: min(1200, max([text_px(col) + 50] + [text_px(fmt_cell(col, v)) + 30 for v in df_view[col]]))
+                    for col in df_view.columns if col not in ('id', '_apply_nonce')
+                }
+
+                gb = GridOptionsBuilder.from_dataframe(df_view)
+                gb.configure_default_column(editable=False, sortable=True, resizable=True)
+                gb.configure_column('id', hide=True)
+                gb.configure_column('_apply_nonce', hide=True)
+                gb.configure_column('구분', cellStyle=tp_style_js)
+                for col in ['수량', '단가', '거래금액', '잔여현금']:
+                    gb.configure_column(col, type=['numericColumn'], valueFormatter=number_fmt_js)
+                gb.configure_column('실현손익', type=['numericColumn'], valueFormatter=signed_won_js, cellStyle=pl_style_js)
+                gb.configure_column('수익률', type=['numericColumn'], valueFormatter=signed_pct_js, cellStyle=pl_style_js)
+                # 편집 항목: 사유·판단결과는 여러 줄 텍스트 팝업, 판단모드는 콤보박스
+                gb.configure_column('사유', editable=True, cellEditor='agLargeTextCellEditor', cellEditorPopup=True,
+                                    cellEditorParams={'maxLength': 500, 'rows': 6, 'cols': 50},
+                                    tooltipField='사유', cellStyle={'backgroundColor': '#fff8e1'})
+                gb.configure_column('판단모드', editable=True, cellEditor='agSelectCellEditor',
+                                    cellEditorParams={'values': [''] + list(CHECK_MODES.values())},
+                                    singleClickEdit=True, cellStyle={'backgroundColor': '#fff8e1'})
+                gb.configure_column('판단결과', editable=True, cellEditor='agLargeTextCellEditor', cellEditorPopup=True,
+                                    cellEditorParams={'maxLength': 2000, 'rows': 6, 'cols': 50},
+                                    tooltipField='판단결과', cellStyle={'backgroundColor': '#fff8e1'})
+                for col, w in col_widths.items():
+                    gb.configure_column(col, width=w, minWidth=w, suppressSizeToFit=True)
+                # 매매일자·구분은 좌측 고정, 나머지 항목만 가로 스크롤
+                for col in ('매매일자', '구분'):
+                    gb.configure_column(col, pinned='left', lockPinned=True)
+                # 열 폭 합계가 화면보다 넓으면 가로 스크롤
+                # (from_dataframe 이 기본으로 넣는 autoSizeStrategy=fitGridWidth 는 열을 화면 폭에 강제로 맞추므로 해제)
+                gb.configure_grid_options(
+                    autoSizeStrategy=None,
+                    statusBar={'statusPanels': [{'statusPanel': APPLY_EDITS_PANEL_JS, 'align': 'left'}]},
+                    tooltipShowDelay=300,
+                    suppressColumnVirtualisation=True, alwaysShowHorizontalScroll=True,
+                )
+                gb.configure_pagination(enabled=True, paginationAutoPageSize=False, paginationPageSize=20)
+
+                st.caption("판단모드는 셀을 클릭해 콤보박스에서 선택하고, 사유·판단결과는 셀을 더블클릭해 입력한 뒤 "
+                           "그리드 하단 [변경 적용]을 누르면 저장됩니다.")
+                grid_response = AgGrid(
+                    df_view,
+                    gridOptions=gb.build(),
+                    height=None,                     # 행 수에 맞춰 높이 자동 (기본 400px 고정이면 하단 가로 스크롤바가 잘림)
+                    allow_unsafe_jscode=True,
+                    use_container_width=True,
+                    update_mode=GridUpdateMode.NO_UPDATE,
+                    update_on=['filterChanged'],     # [변경 적용] 버튼이 발생시키는 이벤트에서만 값 반환
+                    enable_enterprise_modules=True,  # 상태바 버튼 위해 필요
+                    key=f"mock_hist_grid_{tracker_id}",
+                )
+
+                # [변경 적용] 클릭으로 들어온 새 요청일 때만 편집 전/후 비교로 변경된 사유/판단모드/판단결과 저장
+                edited_df = pd.DataFrame(grid_response['data'])
+                if is_new_apply_request(edited_df, f"mock_hist_apply_{tracker_id}") and 'id' in edited_df.columns:
+                    orig = df_view.set_index('id')
+                    updates = []
+                    for _, row in edited_df.iterrows():
+                        tid = int(row['id'])
+                        if tid not in orig.index:
+                            continue
+                        new_mode = row.get('판단모드')
+                        new_mode = new_mode.strip() if isinstance(new_mode, str) else ''
+                        new_result = row.get('판단결과')
+                        new_result = new_result.strip() if isinstance(new_result, str) else ''
+                        new_reason = row.get('사유')
+                        new_reason = new_reason.strip() if isinstance(new_reason, str) else ''
+                        if (new_mode != orig.at[tid, '판단모드'] or new_result != orig.at[tid, '판단결과'].strip()
+                                or new_reason != orig.at[tid, '사유'].strip()):
+                            updates.append((
+                                """UPDATE public.mock_tracker_trade
+                                      SET reason = %s, check_mode = %s, result_check = %s, mod_dt = now()
+                                    WHERE id = %s""",
+                                (new_reason or None, CHECK_MODE_CODES.get(new_mode), new_result or None, tid)))
+                    if not updates:
+                        st.info("변경된 항목이 없습니다.")
+                    elif run_write(updates, "판단 저장"):
+                        st.session_state['mock_msg'] = f"거래 {len(updates)}건의 사유/판단모드/판단결과가 저장되었습니다."
+                        st.rerun()
 
                 # 마지막 거래 취소 (재생 방식이라 마지막 거래만 취소해야 이후 잔고가 일관됨)
                 last = df_hist.iloc[-1]
