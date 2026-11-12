@@ -29,8 +29,12 @@ st.markdown("""
 .mt-badge {display:inline-block;padding:3px 12px;border-radius:12px;font-size:0.85rem;font-weight:700;margin-bottom:6px;}
 .mt-badge.buy {background:#e8f7f1;color:#0f8a5f;}
 .mt-badge.sell {background:#fdecec;color:#dc2626;}
-.mt-expect {font-size:0.85rem;line-height:1.5;}
+/* 입력란 높이에 맞춰 세로 가운데 (마크다운 요소의 음수 하단 여백 -1rem 을 상쇄해 입력란과 같은 높이에 위치) */
+.mt-expect {font-size:0.85rem;line-height:1.5;min-height:2.5rem;display:flex;align-items:center;margin-bottom:1rem;}
 .mt-expect b {color:#0284c7;}
+/* 단가 입력란의 +/- 버튼 숨김 */
+div[class*="st-key-mt_price_box_"] [data-testid="stNumberInputStepUp"],
+div[class*="st-key-mt_price_box_"] [data-testid="stNumberInputStepDown"] {display:none;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -163,10 +167,11 @@ def create_tracker(acct_no, code, name, init_cash):
 
 
 # 매매 저장 + 해당 슬롯 현재가를 체결가로 갱신
-def save_trade(tracker_id, trade_dt, slot, trade_tp, price, qty):
+def save_trade(tracker_id, trade_dt, slot, trade_tp, price, qty, reason=None):
+    reason = (reason or '').strip() or None
     return run_write([
-        ("""INSERT INTO public.mock_tracker_trade (tracker_id, trade_dt, slot, trade_tp, price, qty, crt_dt)
-            VALUES (%s, %s, %s, %s, %s, %s, now())""", (tracker_id, trade_dt, slot, trade_tp, price, qty)),
+        ("""INSERT INTO public.mock_tracker_trade (tracker_id, trade_dt, slot, trade_tp, price, qty, reason, crt_dt)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, now())""", (tracker_id, trade_dt, slot, trade_tp, price, qty, reason)),
         ("""INSERT INTO public.mock_tracker_price (tracker_id, slot, cur_price, mod_dt) VALUES (%s, %s, %s, now())
             ON CONFLICT (tracker_id, slot) DO UPDATE SET cur_price = EXCLUDED.cur_price, mod_dt = now()""",
          (tracker_id, slot, price)),
@@ -191,7 +196,7 @@ def replay(trades, init_cash):
     for t in trades.itertuples():
         p = pos.setdefault(t.slot, {'qty': 0, 'cost': 0.0})
         amount = t.price * t.qty
-        realized = None
+        realized = realized_rt = None   # 매도 거래만: 실현손익, 평균단가 대비 수익률(%)
         if t.trade_tp == 'B':
             cash -= amount
             p['qty'] += t.qty
@@ -200,6 +205,7 @@ def replay(trades, init_cash):
             avg = p['cost'] / p['qty'] if p['qty'] else 0
             realized = (t.price - avg) * t.qty
             realized_total += realized
+            realized_rt = (t.price / avg - 1) * 100 if avg else None
             p['cost'] -= avg * t.qty
             p['qty'] -= t.qty
             cash += amount
@@ -207,7 +213,8 @@ def replay(trades, init_cash):
         equity = cash + sum(v['qty'] * last_px.get(s, 0) for s, v in pos.items())
         curve.append((f"{t.slot}{'매수' if t.trade_tp == 'B' else '매도'}", (equity / init_cash - 1) * 100))
         history.append({'id': t.id, 'trade_dt': t.trade_dt, 'trade_tp': t.trade_tp, 'slot': t.slot, 'qty': t.qty,
-                        'price': t.price, 'amount': amount, 'realized': realized, 'cash': cash})
+                        'price': t.price, 'amount': amount, 'realized': realized, 'realized_rt': realized_rt,
+                        'cash': cash, 'reason': t.reason})
     return cash, pos, realized_total, pd.DataFrame(history), curve
 
 
@@ -232,7 +239,7 @@ query_nickname = st.query_params.get('nickname')
 my_choice = query_nickname if query_nickname in nickname else nickname[0]
 acct_no = account(my_choice)
 
-st.header("모의투자 트래커")
+st.header("150개 형성된 봉 기준으로 마지막봉을 보고 판단(모의투자)")
 
 if 'mock_msg' in st.session_state:
     st.success(st.session_state.pop('mock_msg'))
@@ -299,10 +306,10 @@ else:
 
     cur05 = conn.cursor()
     cur05.execute("""
-        SELECT id, trade_dt, slot, trade_tp, price, qty FROM public.mock_tracker_trade
+        SELECT id, trade_dt, slot, trade_tp, price, qty, reason FROM public.mock_tracker_trade
         WHERE tracker_id = %s ORDER BY trade_dt, id
     """, (tracker_id,))
-    trades = pd.DataFrame(cur05.fetchall(), columns=['id', 'trade_dt', 'slot', 'trade_tp', 'price', 'qty'])
+    trades = pd.DataFrame(cur05.fetchall(), columns=['id', 'trade_dt', 'slot', 'trade_tp', 'price', 'qty', 'reason'])
     cur05.execute("SELECT slot, cur_price FROM public.mock_tracker_price WHERE tracker_id = %s", (tracker_id,))
     cur_prices = {s: float(p) for s, p in cur05.fetchall()}
     cur05.close()
@@ -331,19 +338,22 @@ else:
                     unsafe_allow_html=True)
 
         if sell_mode:
-            c1, c2, c3, c4, c5, c6 = st.columns([1, 1.3, 4, 1, 0.8, 0.9], vertical_alignment="bottom")
+            c1, c2, c3, c4, c5, c6 = st.columns([1, 1.3, 2, 2, 1.2, 0.9], vertical_alignment="bottom")
         else:
-            c1, c2, c3, c4, c6 = st.columns([1, 1.3, 4, 1.8, 0.9], vertical_alignment="bottom")
+            c1, c2, c3, c4, c6 = st.columns([1, 1.3, 2, 3.8, 0.9], vertical_alignment="bottom")
+        # 사유는 거래 입력 행 아래 줄에 전체 너비로 표시 (매수/매도 버튼 처리 전에 값을 읽어야 하므로 여기서 생성)
+        reason = st.container().text_area("사유", max_chars=500, placeholder="매매 사유 (선택)", height=100,
+                                          key=f"mock_reason_{tracker_id}_{nonce}")
         slot = c1.selectbox("슬롯", SLOTS, key=f"mock_slot_{tracker_id}")
         trade_date = c2.date_input("매매일자", datetime.now(), format="YYYY-MM-DD", key=f"mock_dt_{tracker_id}")
-        price = c3.number_input("단가 (원)", min_value=0, step=100, value=None, placeholder="0",
+        price = c3.container(key=f"mt_price_box_{tracker_id}").number_input("단가 (원)", min_value=0, step=100, value=None, placeholder="0",
                                 key=f"mock_price_{tracker_id}_{nonce}")
 
         if sell_mode:
             qty_key = f"mock_sell_qty_{tracker_id}_{nonce}"
             sell_qty = c4.number_input("매도 수량", min_value=0, max_value=hold['qty'], step=1, value=None,
                                        placeholder="전량", key=qty_key)
-            c5.button("전량", key=f"mock_all_{tracker_id}_{nonce}",
+            c5.button("전량", use_container_width=True, key=f"mock_all_{tracker_id}_{nonce}",
                       on_click=lambda k=qty_key, q=hold['qty']: st.session_state.__setitem__(k, q))
             if c6.button("매도", type="primary", use_container_width=True, key=f"mock_sell_{tracker_id}"):
                 qty = int(sell_qty) if sell_qty else hold['qty']
@@ -351,7 +361,7 @@ else:
                     st.error("단가를 입력하세요.")
                 elif qty <= 0 or qty > hold['qty']:
                     st.error(f"매도 수량은 1~{hold['qty']:,}주 사이여야 합니다.")
-                elif save_trade(tracker_id, trade_date.strftime('%Y%m%d'), slot, 'S', price, qty):
+                elif save_trade(tracker_id, trade_date.strftime('%Y%m%d'), slot, 'S', price, qty, reason):
                     pl = (price - hold['cost'] / hold['qty']) * qty
                     st.session_state[f"mock_nonce_{tracker_id}"] = nonce + 1
                     st.session_state['mock_msg'] = f"{name} {slot} {qty:,}주 매도 (실현손익 {signed(pl, '원')})"
@@ -363,14 +373,14 @@ else:
                           f"{cash - buy_qty * price:,.0f}원")
             else:
                 expect = "단가 입력 시 자동 계산"
-            c4.markdown(f"<div class='mt-expect'><b style='color:#475569'>예상</b><br>{expect}</div>",
+            c4.markdown(f"<div class='mt-expect'><div>{expect}</div></div>",
                         unsafe_allow_html=True)
             if c6.button("매수", type="primary", use_container_width=True, key=f"mock_buy_{tracker_id}"):
                 if not price:
                     st.error("단가를 입력하세요.")
                 elif buy_qty <= 0:
                     st.error("가용 현금이 부족합니다.")
-                elif save_trade(tracker_id, trade_date.strftime('%Y%m%d'), slot, 'B', price, buy_qty):
+                elif save_trade(tracker_id, trade_date.strftime('%Y%m%d'), slot, 'B', price, buy_qty, reason):
                     st.session_state[f"mock_nonce_{tracker_id}"] = nonce + 1
                     st.session_state['mock_msg'] = f"{name} {slot} {buy_qty:,}주 매수 ({buy_qty * price:,.0f}원)"
                     st.rerun()
@@ -420,15 +430,18 @@ else:
                     '매매일자': df_hist['trade_dt'].map(fmt_dt),
                     '구분': df_hist['trade_tp'].map({'B': 'BUY', 'S': 'SELL'}),
                     '슬롯': df_hist['slot'], '수량': df_hist['qty'], '단가': df_hist['price'],
-                    '거래금액': df_hist['amount'], '실현손익': df_hist['realized'], '잔여현금': df_hist['cash'],
+                    '거래금액': df_hist['amount'], '실현손익': df_hist['realized'],
+                    '수익률': pd.to_numeric(df_hist['realized_rt']), '잔여현금': df_hist['cash'],
+                    '사유': df_hist['reason'].fillna(''),
                 }).iloc[::-1]
                 st.dataframe(
                     df_view.style.format({'수량': '{:,}', '단가': '{:,.0f}', '거래금액': '{:,.0f}',
                                           '실현손익': lambda v: '—' if pd.isna(v) else f"{v:+,.0f}원",
+                                          '수익률': lambda v: '—' if pd.isna(v) else f"{v:+.2f}%",
                                           '잔여현금': '{:,.0f}'})
                     .map(lambda v: f"color: {UP_COLOR if v == 'BUY' else DOWN_COLOR}; font-weight: 700",
                          subset=['구분'])
-                    .map(pl_color, subset=['실현손익']),
+                    .map(pl_color, subset=['실현손익', '수익률']),
                     hide_index=True, use_container_width=True)
 
                 # 마지막 거래 취소 (재생 방식이라 마지막 거래만 취소해야 이후 잔고가 일관됨)
