@@ -451,7 +451,9 @@ else:
 
     # 보유종목 / 거래내역
     with st.container(border=True):
-        tab_hold, tab_hist = st.tabs(["보유종목", "거래내역"])
+        # 탭 전환 시 재실행하고 선택된 탭만 그린다(.open). 거래내역 AG-Grid 가 숨겨진(비활성) 탭에서 생성되면
+        # 폭을 0으로 측정해 가로 스크롤바가 나오지 않으므로, 탭이 보일 때 그리드를 생성하기 위함.
+        tab_hold, tab_hist = st.tabs(["보유종목", "거래내역"], key="mock_hold_hist_tabs", on_change="rerun")
         with tab_hold:
             if not holdings:
                 st.caption("보유 종목이 없습니다")
@@ -470,7 +472,9 @@ else:
                     .map(pl_color, subset=['평가손익', '수익률', '기여도']),
                     hide_index=True, use_container_width=True)
         with tab_hist:
-            if df_hist.empty:
+            if not tab_hist.open:
+                pass   # 거래내역 탭이 선택되지 않았으면 그리지 않음 (탭 선택 시 재실행되어 그려짐)
+            elif df_hist.empty:
                 st.caption("거래 내역이 없습니다")
             else:
                 df_view = pd.DataFrame({
@@ -568,7 +572,9 @@ else:
                 grid_response = AgGrid(
                     df_view,
                     gridOptions=gb.build(),
-                    height=None,                     # 행 수에 맞춰 높이 자동 (기본 400px 고정이면 하단 가로 스크롤바가 잘림)
+                    # 높이는 행 수(페이지당 최대 20행)로 직접 계산: 헤더 33 + 행 29×N + 페이지바 29 + 상태바 35 + 가로스크롤 16 + 여유
+                    # (height=None 자동 높이는 탭 전환 후 생성될 때 iframe 높이가 0이 되어 그리드가 보이지 않음)
+                    height=33 + 29 * min(len(df_view), 20) + 29 + 35 + 16 + 12,
                     allow_unsafe_jscode=True,
                     use_container_width=True,
                     update_mode=GridUpdateMode.NO_UPDATE,
