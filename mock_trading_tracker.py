@@ -585,8 +585,9 @@ def render_trade_stats(acct_no, trackers):
             return
 
         def in_range(col):
+            # Timestamp 끼리 비교 (값이 전부 NaT 인 경우 .dt.date 가 datetime64 로 남아 date 와 비교 시 TypeError)
             d = pd.to_datetime(pos[col])
-            return pos[d.notna() & (d.dt.date >= start) & (d.dt.date <= end)]
+            return pos[d.notna() & (d >= pd.Timestamp(start)) & (d < pd.Timestamp(end) + pd.Timedelta(days=1))]
 
         # 기준별 대상: 최종 = 기간 내 청산된 포지션, 첫매도 = 기간 내 첫매도가 있는 포지션
         final = in_range('exit_dt').assign(dt=lambda x: x['exit_dt'], pl=lambda x: x['pnl'], rt=lambda x: x['final_rt'])
