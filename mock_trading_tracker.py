@@ -1,6 +1,8 @@
 import psycopg2 as db
 from datetime import datetime
 import io
+import os
+import re
 import time
 import requests
 import pandas as pd
@@ -76,6 +78,14 @@ st.markdown("""
 /* 입력란 높이에 맞춰 세로 가운데 (마크다운 요소의 음수 하단 여백 -1rem 을 상쇄해 입력란과 같은 높이에 위치) */
 .mt-expect {font-size:0.85rem;line-height:1.5;min-height:2.5rem;display:flex;align-items:center;margin-bottom:1rem;}
 .mt-expect b {color:#0284c7;}
+/* 매매통계 요약 카드 */
+.mt-stat-title {font-size:0.95rem;font-weight:700;margin:6px 0 6px;}
+.mt-stat-title span {font-size:0.78rem;font-weight:400;color:#64748b;}
+.mt-stat-row {display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:8px;}
+.mt-stat {border:1px solid rgba(49,51,63,0.2);border-radius:8px;padding:12px 14px;}
+.mt-stat .lbl {font-size:0.85rem;color:#64748b;}
+.mt-stat .val {font-size:1.5rem;font-weight:600;line-height:1.4;word-break:keep-all;}
+.mt-stat .sub {font-size:0.78rem;color:#64748b;min-height:1.1em;}
 /* 단가 입력란의 +/- 버튼 숨김 */
 div[class*="st-key-mt_price_box_"] [data-testid="stNumberInputStepUp"],
 div[class*="st-key-mt_price_box_"] [data-testid="stNumberInputStepDown"] {display:none;}
@@ -190,6 +200,213 @@ def run_write(sql_params, err_label):
         cur.close()
 
 
+# ── 가져오기 / 전체저장 / 전체삭제 (C:\project\simul\simul_server.py 의 import-csv / save-all / delete-all 과 같은 방식) ──
+# 단, 모의투자 테이블은 여러 계좌(닉네임)가 함께 쓰므로 모든 처리는 현재 계좌(acct_no)의 트래커 범위로 한정한다.
+# 테이블 순서 = 가져오기/저장 순서 (mock_tracker 가 부모, 나머지는 tracker_id FK ON DELETE CASCADE)
+MOCK_TABLES = ['mock_tracker', 'mock_tracker_trade', 'mock_tracker_price']
+MOCK_EXPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mock_exports')
+# 파일명 → 테이블 (mock_tracker 가 다른 두 테이블명의 접두어이므로 긴 이름부터 비교)
+_MOCK_FILE_RE = re.compile(r'^(mock_tracker_trade|mock_tracker_price|mock_tracker)(_|\.|$)')
+
+
+def _acct_filter(table):
+    """테이블별 현재 계좌 범위 WHERE 절 (파라미터 acct_no 1개)"""
+    if table == 'mock_tracker':
+        return "acct_no = %s"
+    return "tracker_id IN (SELECT id FROM public.mock_tracker WHERE acct_no = %s)"
+
+
+def _table_columns(cur, table):
+    cur.execute("""SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position""", (table,))
+    return [r[0] for r in cur.fetchall()]
+
+
+def mock_save_all(acct_no):
+    """현재 계좌의 3개 테이블을 CSV(BOM 포함)로 저장하고, _save 테이블이 있으면 save_dtm 을 붙여 스냅샷 복사.
+    반환: [{'table', 'rows', 'file', 'saved_to_table'}]"""
+    os.makedirs(MOCK_EXPORT_DIR, exist_ok=True)
+    now = datetime.now()
+    now_str, save_dtm = now.strftime('%Y%m%d_%H%M%S'), now.strftime('%Y%m%d%H%M%S')
+    results = []
+    cur = conn.cursor()
+    try:
+        for table in MOCK_TABLES:
+            cols = ', '.join(_table_columns(cur, table))
+            where = cur.mogrify(_acct_filter(table), (str(acct_no),)).decode()
+            order = 'tracker_id, slot' if table == 'mock_tracker_price' else 'id'
+            saved = False
+            cur.execute("SELECT to_regclass(%s)", (f'public.{table}_save',))
+            if cur.fetchone()[0]:
+                cur.execute(f"INSERT INTO public.{table}_save (save_dtm, {cols}) "
+                            f"SELECT %s, {cols} FROM public.{table} WHERE {where}", (save_dtm,))
+                saved = True
+            buf = io.BytesIO()
+            cur.copy_expert(f"COPY (SELECT {cols} FROM public.{table} WHERE {where} ORDER BY {order}) "
+                            f"TO STDOUT WITH CSV HEADER", buf)
+            fname = f'{table}_{acct_no}_{now_str}.csv'
+            with open(os.path.join(MOCK_EXPORT_DIR, fname), 'wb') as fout:
+                fout.write(b'\xef\xbb\xbf')
+                fout.write(buf.getvalue())
+            cur.execute(f"SELECT count(*) FROM public.{table} WHERE {where}")   # 여러 줄 텍스트가 있어 줄 수로 세지 않음
+            rows = cur.fetchone()[0]
+            results.append({'table': table, 'rows': rows, 'file': fname, 'saved_to_table': saved})
+        conn.commit()
+        return results
+    except Exception as e:
+        conn.rollback()
+        st.error(f"전체저장 오류: {e}")
+        return None
+    finally:
+        cur.close()
+
+
+def mock_import_csv(acct_no, files):
+    """업로드한 CSV(파일명으로 테이블 인식)로 현재 계좌 데이터를 교체. 한 트랜잭션으로 처리하며 하나라도 실패하면 전체 롤백.
+    - 가져오기 순서: mock_tracker → mock_tracker_trade → mock_tracker_price
+    - mock_tracker 행은 모두 현재 계좌(acct_no)여야 하고, trade/price 행은 현재 계좌 트래커의 tracker_id 여야 함
+    - mock_tracker 를 교체하면 FK CASCADE 로 기존 매매/현재가도 삭제되므로 세 파일을 함께 가져오는 것을 권장"""
+    by_table = {}
+    for f in files:
+        m = _MOCK_FILE_RE.match(f.name or '')
+        if not m:
+            st.error(f"{f.name}: 파일명에서 테이블을 인식할 수 없습니다. ({' / '.join(MOCK_TABLES)} 중 하나로 시작해야 합니다)")
+            return None
+        if m.group(1) in by_table:
+            st.error(f"{m.group(1)} 파일이 두 개 이상 선택되었습니다.")
+            return None
+        by_table[m.group(1)] = f
+    acct = str(acct_no)
+    msgs = []
+    cur = conn.cursor()
+    try:
+        for table in [t for t in MOCK_TABLES if t in by_table]:
+            raw = by_table[table].getvalue()
+            if raw.startswith(b'\xef\xbb\xbf'):
+                raw = raw[3:]
+            cols = ', '.join(_table_columns(cur, table))
+            cur.execute(f"CREATE TEMP TABLE _mock_import (LIKE public.{table}) ON COMMIT DROP")
+            cur.copy_expert(f"COPY _mock_import ({cols}) FROM STDIN WITH CSV HEADER NULL ''", io.BytesIO(raw))
+            # 다른 계좌 데이터가 섞여 있으면 거부
+            if table == 'mock_tracker':
+                cur.execute("SELECT count(*) FROM _mock_import WHERE acct_no IS DISTINCT FROM %s", (acct,))
+            else:
+                cur.execute("SELECT count(*) FROM _mock_import WHERE tracker_id NOT IN "
+                            "(SELECT id FROM public.mock_tracker WHERE acct_no = %s)", (acct,))
+            bad = cur.fetchone()[0]
+            if bad:
+                raise ValueError(f"{table}: 현재 계좌({acct})가 아닌 데이터 {bad}건이 포함되어 있습니다.")
+            cur.execute(f"DELETE FROM public.{table} WHERE {_acct_filter(table)}", (acct,))
+            deleted = cur.rowcount
+            cur.execute(f"INSERT INTO public.{table} ({cols}) SELECT {cols} FROM _mock_import")
+            msgs.append(f"{table} 가져오기 완료 ({cur.rowcount}건, 기존 {deleted}건 삭제)")
+            cur.execute("DROP TABLE _mock_import")
+        # 가져온 id 가 시퀀스보다 크면 시퀀스를 올려 다음 생성 시 id 충돌 방지 (낮추지는 않음, setval 은 롤백되지 않음)
+        for table in ('mock_tracker', 'mock_tracker_trade'):
+            cur.execute("SELECT pg_get_serial_sequence(%s, 'id')", (f'public.{table}',))
+            seq = cur.fetchone()[0]
+            cur.execute(f"SELECT last_value FROM {seq}")
+            last = cur.fetchone()[0]
+            cur.execute(f"SELECT max(id) FROM public.{table}")
+            max_id = cur.fetchone()[0] or 0
+            if max_id > last:
+                cur.execute("SELECT setval(%s, %s)", (seq, max_id))
+        conn.commit()
+        return msgs
+    except Exception as e:
+        conn.rollback()
+        st.error(f"가져오기 오류 (전체 취소됨): {e}")
+        return None
+    finally:
+        cur.close()
+
+
+def mock_delete_all(acct_no):
+    """현재 계좌의 트래커 전체 삭제 (매매/현재가는 FK CASCADE 로 함께 삭제). 반환: 테이블별 삭제 건수"""
+    acct = str(acct_no)
+    cur = conn.cursor()
+    try:
+        counts = {}
+        for table in reversed(MOCK_TABLES):   # 자식 테이블 건수 먼저 집계 후 삭제
+            cur.execute(f"DELETE FROM public.{table} WHERE {_acct_filter(table)}", (acct,))
+            counts[table] = cur.rowcount
+        conn.commit()
+        return counts
+    except Exception as e:
+        conn.rollback()
+        st.error(f"전체삭제 오류: {e}")
+        return None
+    finally:
+        cur.close()
+
+
+def render_data_tools(acct_no, nickname_):
+    """화면 상단 [가져오기] [전체저장] [전체삭제] 도구 모음"""
+    # 전체삭제 확인 대화상자: 대화상자(fragment) 재실행 시점에는 이전 실행의 DB 연결이 닫혀 있을 수 있으므로
+    # 확인 버튼은 요청만 기록하고 전체 재실행 후 여기서 처리한다.
+    if st.session_state.pop('mock_delete_all_request', None) == str(acct_no):
+        counts = mock_delete_all(acct_no)
+        if counts is not None:
+            st.session_state.pop('mock_saved_files', None)
+            st.session_state['mock_msg'] = (f"전체삭제 완료 (총 {sum(counts.values())}건 — 트래커 {counts['mock_tracker']}, "
+                                            f"매매 {counts['mock_tracker_trade']}, 현재가 {counts['mock_tracker_price']})")
+            st.rerun()
+
+    @st.dialog("전체삭제")
+    def confirm_delete_all():
+        st.warning(f"**{nickname_}** 계좌({acct_no})의 모의투자 데이터 전체를 삭제합니다.\n\n"
+                   "- mock_tracker (트래커)\n- mock_tracker_trade (매매내역)\n- mock_tracker_price (현재가)\n\n"
+                   "삭제 전에 전체저장을 먼저 실행하시길 권장합니다.")
+        c1, c2 = st.columns(2)
+        if c1.button("삭제", type="primary", use_container_width=True):
+            st.session_state['mock_delete_all_request'] = str(acct_no)
+            st.rerun()
+        if c2.button("취소", use_container_width=True):
+            st.rerun()
+
+    b1, b2, b3, _ = st.columns([1.6, 1.6, 1.6, 3.2])
+    with b1.popover("📂 가져오기", use_container_width=True):
+        st.caption("전체저장으로 받은 CSV를 선택하세요. 파일명이 mock_tracker / mock_tracker_trade / "
+                   "mock_tracker_price 로 시작해야 하며, 현재 계좌 데이터가 파일 내용으로 교체됩니다. "
+                   "mock_tracker 를 가져오면 기존 매매·현재가도 함께 삭제되므로 세 파일을 함께 선택하세요.")
+        up_key = f"mock_import_files_{st.session_state.get('mock_import_nonce', 0)}"
+        files = st.file_uploader("CSV 파일", type=['csv'], accept_multiple_files=True, key=up_key,
+                                 label_visibility='collapsed')
+        if st.button("가져오기 실행", type="primary", disabled=not files, use_container_width=True):
+            msgs = mock_import_csv(acct_no, files)
+            if msgs is not None:
+                st.session_state['mock_import_nonce'] = st.session_state.get('mock_import_nonce', 0) + 1
+                st.session_state['mock_msg'] = "\n\n".join(msgs)
+                st.rerun()
+    if b2.button("💾 전체저장", use_container_width=True):
+        results = mock_save_all(acct_no)
+        if results is not None:
+            st.session_state['mock_saved_files'] = results
+            st.session_state['mock_msg'] = "전체저장 완료" + (
+                "" if all(r['saved_to_table'] for r in results) else
+                " (CSV만 저장 — _save 테이블이 없어 DB 스냅샷은 생략)")
+            st.rerun()
+    if b3.button("🗑️ 전체삭제", use_container_width=True):
+        confirm_delete_all()
+
+    # 전체저장 다운로드 패널
+    saved = st.session_state.get('mock_saved_files')
+    if saved:
+        with st.container(border=True):
+            h1, h2 = st.columns([6, 1])
+            h1.markdown("**📥 저장된 파일 다운로드**")
+            if h2.button("✕", key="mock_saved_close"):
+                st.session_state.pop('mock_saved_files', None)
+                st.rerun()
+            cols = st.columns(len(saved))
+            for col, r in zip(cols, saved):
+                path = os.path.join(MOCK_EXPORT_DIR, r['file'])
+                if os.path.exists(path):
+                    with open(path, 'rb') as fin:
+                        col.download_button(f"{r['table']} ({r['rows']}건)", fin.read(), file_name=r['file'],
+                                            mime='text/csv', key=f"mock_dl_{r['file']}", use_container_width=True)
+
+
 # 트래커 생성 (생성된 id 반환, 실패 시 None)
 def create_tracker(acct_no, code, name, init_cash):
 
@@ -267,6 +484,199 @@ def fmt_dt(d):
     return f"{d[:4]}-{d[4:6]}-{d[6:]}" if d and len(d) == 8 else d
 
 
+# 매매통계: 계좌의 전체 트래커(종목) 매매를 종목별로 재생해 매도 시점 실현손익을 구한 뒤 기간별로 합산
+STAT_PERIODS = {'일별': 'D', '주별': 'W', '월별': 'M'}
+
+
+def load_all_trade_history(acct_no, trackers):
+    """트래커별 replay 결과(거래내역)에 종목명/초기자금을 붙여 하나의 DataFrame 으로 반환"""
+    if not trackers:
+        return pd.DataFrame()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT tracker_id, id, trade_dt, slot, trade_tp, price, qty, reason, check_mode, result_check
+          FROM public.mock_tracker_trade
+         WHERE tracker_id = ANY(%s) ORDER BY tracker_id, trade_dt, id
+    """, ([t[0] for t in trackers],))
+    rows = cur.fetchall()
+    cur.close()
+    all_trades = pd.DataFrame(rows, columns=['tracker_id', 'id', 'trade_dt', 'slot', 'trade_tp', 'price', 'qty',
+                                             'reason', 'check_mode', 'result_check'])
+    if all_trades.empty:
+        return pd.DataFrame()
+    all_trades['price'] = pd.to_numeric(all_trades['price']).astype(float)
+    frames = []
+    for tid, code_, name_, cash0 in trackers:
+        tr = all_trades[all_trades['tracker_id'] == tid]
+        if tr.empty:
+            continue
+        hist = replay(tr, float(cash0))[3]
+        hist['name'] = name_
+        frames.append(hist)
+    df = pd.concat(frames, ignore_index=True)
+    df['date'] = pd.to_datetime(df['trade_dt'], format='%Y%m%d', errors='coerce')
+    df['realized'] = pd.to_numeric(df['realized'])
+    df['realized_rt'] = pd.to_numeric(df['realized_rt'])
+    return df.dropna(subset=['date'])
+
+
+def period_label(dates, unit):
+    if unit == 'D':
+        return dates.dt.strftime('%Y-%m-%d')
+    if unit == 'W':   # 해당 주 월요일 기준
+        return (dates - pd.to_timedelta(dates.dt.weekday, unit='D')).dt.strftime('%Y-%m-%d') + ' 주'
+    return dates.dt.strftime('%Y-%m')
+
+
+def build_positions(df_all):
+    """종목별 포지션 구성 (kis_balance_info.py 의 종목별 손익 / 첫 매도 손익 조회와 같은 기준)
+    - 포지션: 종목의 전체 슬롯 합산 보유수량이 0 에서 매수로 시작해 다시 0 이 될 때까지
+    - 최종 손익: 전량 청산된 포지션의 모든 매도 실현손익 합 (청산일 기준, 미청산 포지션 제외)
+    - 첫매도 손익: 포지션 진입 후 첫 번째 매도 1건의 실현손익 (첫매도일 기준, 전량 청산 여부 무관)
+    실현손익은 매도 시점 슬롯 평균단가 기준(replay), 수수료·세금 미반영"""
+    rows = []
+    for name_, g in df_all.sort_values(['name', 'date', 'id']).groupby('name', sort=False):
+        held, p = 0, None
+        for t in g.itertuples():
+            if t.trade_tp == 'B':
+                if held == 0:   # 새 포지션 진입
+                    p = {'name': name_, 'entry_dt': t.date, 'exit_dt': None, 'buy_cnt': 0, 'sell_cnt': 0,
+                         'buy_amt': 0.0, 'pnl': 0.0, 'cost_sold': 0.0,
+                         'first_dt': None, 'first_pnl': None, 'first_rt': None, 'first_buy_cnt': 0}
+                    rows.append(p)
+                held += t.qty
+                p['buy_cnt'] += 1
+                p['buy_amt'] += t.amount
+            elif p is not None:
+                held -= t.qty
+                p['sell_cnt'] += 1
+                p['pnl'] += t.realized
+                p['cost_sold'] += t.amount - t.realized    # 매도분의 평균단가 기준 원가
+                if p['first_dt'] is None:
+                    p['first_dt'], p['first_pnl'], p['first_rt'] = t.date, t.realized, t.realized_rt
+                    p['first_buy_cnt'] = p['buy_cnt']
+                if held <= 0:
+                    held, p['exit_dt'] = 0, t.date
+    pos = pd.DataFrame(rows)
+    if not pos.empty:
+        pos['final_rt'] = pos['pnl'] / pos['cost_sold'].where(pos['cost_sold'] != 0) * 100
+    return pos
+
+
+def render_trade_stats(acct_no, trackers):
+    df_all = load_all_trade_history(acct_no, trackers)
+    with st.container(border=True):
+        st.markdown("**● 매매통계**")
+        if df_all.empty:
+            st.caption("매매 내역이 없습니다")
+            return
+
+        first_day, last_day = df_all['date'].min().date(), max(df_all['date'].max().date(), datetime.now().date())
+        f1, f2, f3 = st.columns([2.2, 2.4, 2.4])
+        unit_label = f1.radio("기간 단위", list(STAT_PERIODS), index=2, horizontal=True, key="mock_stat_unit")
+        rng = f2.date_input("매매기간", (first_day, last_day), min_value=first_day, max_value=last_day,
+                            format="YYYY-MM-DD", key="mock_stat_range")
+        basis = f3.radio("차트·종목별 기준", ['최종 손익', '첫매도 손익'], horizontal=True, key="mock_stat_basis")
+        start, end = (rng[0], rng[1]) if isinstance(rng, (tuple, list)) and len(rng) == 2 else (first_day, last_day)
+
+        pos = build_positions(df_all)
+        if pos.empty:
+            st.caption("매도(실현손익) 내역이 없습니다")
+            return
+
+        def in_range(col):
+            d = pd.to_datetime(pos[col])
+            return pos[d.notna() & (d.dt.date >= start) & (d.dt.date <= end)]
+
+        # 기준별 대상: 최종 = 기간 내 청산된 포지션, 첫매도 = 기간 내 첫매도가 있는 포지션
+        final = in_range('exit_dt').assign(dt=lambda x: x['exit_dt'], pl=lambda x: x['pnl'], rt=lambda x: x['final_rt'])
+        first = in_range('first_dt').assign(dt=lambda x: x['first_dt'], pl=lambda x: x['first_pnl'],
+                                            rt=lambda x: x['first_rt'])
+        open_cnt = int(pos['exit_dt'].isna().sum())
+
+        # 요약 카드 (st.metric 은 긴 값이 '…' 로 잘리므로 HTML 카드, 보조 정보는 아래 작은 글씨)
+        def tile(label, value, sub='', color=''):
+            style = f" style='color:{color}'" if color else ''
+            return (f"<div class='mt-stat'><div class='lbl'>{label}</div><div class='val'{style}>{value}</div>"
+                    f"<div class='sub'>{sub}</div></div>")
+
+        def stat_row(title, d, is_final):
+            wins, losses = d[d['pl'] > 0], d[d['pl'] < 0]
+            # 매매 건수: 최종 = 포지션의 전체 매수/매도, 첫매도 = 첫매도까지의 매수 + 첫매도 1건
+            buy_n = int(d['buy_cnt'].sum() if is_final else d['first_buy_cnt'].sum())
+            sell_n = int(d['sell_cnt'].sum()) if is_final else len(d)
+            n = len(d)
+            total = d['pl'].sum()
+            avg_win = wins['pl'].mean() if not wins.empty else 0.0
+            avg_loss = abs(losses['pl'].mean()) if not losses.empty else 0.0
+            payoff = f"{avg_win / avg_loss:.2f}" if avg_loss > 0 else '—'
+            win_rt = f"{wins['rt'].mean():+.2f}%" if not wins.empty else '—'
+            loss_rt = f"{losses['rt'].mean():+.2f}%" if not losses.empty else '—'
+            color = UP_COLOR if total > 0 else DOWN_COLOR if total < 0 else ''
+            st.markdown(f"<div class='mt-stat-title'>{title}</div><div class='mt-stat-row'>" + "".join([
+                tile('승률 (건수)', f"{len(wins) / n * 100:.1f}% ({n}건)" if n else '—',
+                     f"수익 {len(wins)}건 / 손실 {len(losses)}건"),
+                tile('손익비 (평균수익/평균손실)', payoff, f"{avg_win:,.0f}원 / {avg_loss:,.0f}원"),
+                tile('실현손익 합계', signed(total, '원') if n else '—', f"평균 수익률 {win_rt} / 손실률 {loss_rt}", color),
+                tile('매매 건수', f"{buy_n + sell_n:,}건",
+                     f"매수 {buy_n} · {'매도' if is_final else '첫매도'} {sell_n}"),
+            ]) + "</div>", unsafe_allow_html=True)
+
+        stat_row("📉 첫매도 손익 <span>(포지션 진입 후 첫 번째 매도 기준, 전량 청산 여부 무관)</span>", first, False)
+        stat_row(f"📊 최종 손익합산 <span>(전량 청산된 포지션의 매도 손익 합산 · 미청산 {open_cnt}건 제외)</span>",
+                 final, True)
+
+        sel = final if basis == '최종 손익' else first
+        if sel.empty:
+            st.caption(f"선택한 기간에 {basis} 내역이 없습니다")
+            return
+
+        # 기간별 손익 막대 + 누적 손익 선 (같은 원 단위 축). 최종=청산일, 첫매도=첫매도일 기준
+        unit = STAT_PERIODS[unit_label]
+        by_period = (sel.assign(period=period_label(pd.to_datetime(sel['dt']), unit))
+                     .groupby('period').agg(pl=('pl', 'sum'), cnt=('pl', 'size'),
+                                            wins=('pl', lambda s: int((s > 0).sum())),
+                                            losses=('pl', lambda s: int((s < 0).sum())))
+                     .reset_index().sort_values('period'))
+        by_period['cum'] = by_period['pl'].cumsum()
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=by_period['period'], y=by_period['pl'], name=f'기간 {basis}', showlegend=False,
+            marker=dict(color=[UP_COLOR if v >= 0 else DOWN_COLOR for v in by_period['pl']], cornerradius=4),
+            customdata=by_period[['cnt', 'wins', 'losses']],
+            hovertemplate=f"%{{x}}<br>{basis} %{{y:+,.0f}}원<br>%{{customdata[0]}}건 "
+                          "(수익 %{customdata[1]} / 손실 %{customdata[2]})<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=by_period['period'], y=by_period['cum'], name=f'누적 {basis}', mode='lines+markers',
+            line=dict(color='#475569', width=2), marker=dict(size=8),
+            hovertemplate="%{x}<br>누적 %{y:+,.0f}원<extra></extra>",
+        ))
+        fig.update_xaxes(type='category')
+        fig.update_yaxes(tickformat=',.0f', ticksuffix='원', zeroline=True, zerolinecolor='#94a3b8')
+        fig.update_layout(height=280, margin=dict(l=10, r=10, t=30, b=10), bargap=0.35, hovermode='closest',
+                          title=dict(text=f"기간별 {basis} (막대: 이익 초록 / 손실 빨강)", font=dict(size=13), x=0),
+                          legend=dict(orientation='h', yanchor='bottom', y=1.02, x=1, xanchor='right'))
+        st.plotly_chart(fig, use_container_width=True, key="mock_stat_chart")
+
+        # 종목별 합산 (선택 기준)
+        by_name = (sel.groupby('name').agg(
+            건수=('pl', 'size'), 수익=('pl', lambda s: int((s > 0).sum())), 손실=('pl', lambda s: int((s < 0).sum())),
+            실현손익=('pl', 'sum'), 평균수익률=('rt', 'mean'))
+            .reset_index().rename(columns={'name': '종목명', '평균수익률': '평균 수익률'}))
+        by_name['승률'] = by_name['수익'] / by_name['건수'] * 100
+        by_name = by_name[['종목명', '건수', '수익', '손실', '승률', '실현손익', '평균 수익률']] \
+            .sort_values('실현손익', ascending=False)
+        st.dataframe(
+            by_name.style.format({'실현손익': '{:+,.0f}원', '승률': '{:.1f}%',
+                                  '평균 수익률': lambda v: '—' if pd.isna(v) else f"{v:+.2f}%"})
+            .map(pl_color, subset=['실현손익', '평균 수익률']),
+            hide_index=True, use_container_width=True)
+        st.caption("포지션은 종목의 전체 슬롯 합산 보유수량이 0에서 매수로 시작해 다시 0이 될 때까지입니다. "
+                   "최종 손익은 청산일, 첫매도 손익은 첫매도일 기준으로 기간에 합산되며, 실현손익은 매도 시점 "
+                   "슬롯 평균단가 기준(수수료·세금 미반영)입니다.")
+
+
 def signed(v, suffix=''):
     return f"{v:+,.0f}{suffix}"
 
@@ -286,6 +696,9 @@ acct_no = account(my_choice)
 
 st.header("150개 형성된 봉 기준으로 마지막봉을 보고 판단(모의투자)")
 
+# 가져오기 / 전체저장 / 전체삭제 (현재 계좌 범위)
+render_data_tools(acct_no, my_choice)
+
 if 'mock_msg' in st.session_state:
     st.success(st.session_state.pop('mock_msg'))
 
@@ -295,6 +708,9 @@ cur04.execute("SELECT id, code, name, init_cash FROM public.mock_tracker WHERE a
               (str(acct_no),))
 trackers = cur04.fetchall()
 cur04.close()
+
+# 매매통계 대시보드 (닉네임 계좌의 전체 종목, 매매기간별 합산 실현손익)
+render_trade_stats(acct_no, trackers)
 
 # 트래커는 id 로 선택 (종목코드 보완 등으로 표시 레이블이 바뀌어도 선택 유지), None 은 신규 생성
 tracker_key = f"mock_tracker_{acct_no}"
