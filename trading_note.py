@@ -66,7 +66,7 @@ class GridSearchPanel {
         const save = () => { try { sessionStorage.setItem(cfg.key, JSON.stringify(state)); } catch (e) {} };
         const inputCss = 'padding:4px 8px;border:1.5px solid #e0e0e0;border-radius:6px;font-size:.85rem;';
 
-        // cfg.filtersRow: 윗줄 총건수·통계·[새로고침](오른쪽 정렬), 다음 줄 콤보 조건·종목명 검색(왼쪽 정렬)
+        // cfg.filtersRow: 윗줄 총건수·통계(오른쪽 정렬), 다음 줄 콤보 조건·종목명 검색·[새로고침](왼쪽 정렬)
         //                 아니면 한 줄에 모두 표시
         const rowCss = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
         this.eGui = document.createElement('div');
@@ -172,7 +172,7 @@ class GridSearchPanel {
             if (first) { first.setDataValue('_refresh_nonce', Date.now()); }
             api.onFilterChanged();
         });
-        top.appendChild(refresh);
+        filters.appendChild(refresh);   // 종목명 검색 바로 옆 (한 줄 표시면 같은 줄 끝)
     }
     getGui() { return this.eGui; }
     destroy() { this.api.removeEventListener('modelUpdated', this.update); }
