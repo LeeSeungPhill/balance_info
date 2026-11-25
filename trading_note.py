@@ -66,15 +66,36 @@ class GridSearchPanel {
         const save = () => { try { sessionStorage.setItem(cfg.key, JSON.stringify(state)); } catch (e) {} };
         const inputCss = 'padding:4px 8px;border:1.5px solid #e0e0e0;border-radius:6px;font-size:.85rem;';
 
+        // cfg.filtersRow: 윗줄 총건수·통계·[새로고침](오른쪽 정렬), 다음 줄 콤보 조건·종목명 검색(왼쪽 정렬)
+        //                 아니면 한 줄에 모두 표시
+        const rowCss = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
         this.eGui = document.createElement('div');
-        this.eGui.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap;';
+        let top = this.eGui, filters = this.eGui;
+        if (cfg.filtersRow) {
+            this.eGui.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:4px 0;width:100%;';
+            top = document.createElement('div');
+            top.style.cssText = rowCss + 'justify-content:flex-end;';
+            filters = document.createElement('div');
+            filters.style.cssText = rowCss;
+            this.eGui.appendChild(top);
+            this.eGui.appendChild(filters);
+            // 상태바 패널이 내용 폭만 차지하므로 상태바 전체 폭으로 늘림
+            setTimeout(() => {
+                for (let p = this.eGui.parentElement; p && !p.classList.contains('ag-status-bar'); p = p.parentElement) {
+                    p.style.flex = '1 1 auto';
+                    p.style.width = '100%';
+                }
+            }, 0);
+        } else {
+            this.eGui.style.cssText = rowCss + 'padding:4px 0;';
+        }
         const count = document.createElement('span');
         count.style.cssText = 'font-size:.85rem;color:#555;';
-        this.eGui.appendChild(count);
+        top.appendChild(count);
         // 콤보 조건 항목별 건수 (조건 적용 후 남은 행 기준)
         const stats = document.createElement('span');
         stats.style.cssText = 'font-size:.8rem;color:#777;';
-        this.eGui.appendChild(stats);
+        top.appendChild(stats);
         const optionHit = (sel, o, d) => o.field ? String(d[o.field] || '').trim() !== ''
                                                  : String(d[sel.field] || '') === o.value;
 
@@ -95,7 +116,7 @@ class GridSearchPanel {
                 save();
                 api.onFilterChanged();
             });
-            this.eGui.appendChild(box);
+            filters.appendChild(box);
         });
 
         // 종목명 검색 (다시 그려질 때는 외부 필터가 저장된 조건을 바로 읽으므로 onFilterChanged 를 부르지 않음 -
@@ -114,7 +135,7 @@ class GridSearchPanel {
                 api.onFilterChanged();
             }, 300);
         });
-        this.eGui.appendChild(input);
+        filters.appendChild(input);
 
         // 건수는 조건 적용 후 남은 행 수, 조건이 있으면 전체 건수도 함께 표시
         this.update = () => {
@@ -151,7 +172,7 @@ class GridSearchPanel {
             if (first) { first.setDataValue('_refresh_nonce', Date.now()); }
             api.onFilterChanged();
         });
-        this.eGui.appendChild(refresh);
+        top.appendChild(refresh);
     }
     getGui() { return this.eGui; }
     destroy() { this.api.removeEventListener('modelUpdated', this.update); }
@@ -189,9 +210,10 @@ function(node) {
 """
 
 
-def grid_search_options(storage_key, selects=()):
-    """GRID_SEARCH_PANEL_JS 상태바 패널 + 외부 필터 gridOptions 생성 (storage_key: 그리드별 sessionStorage key)"""
-    config = json.dumps({'key': storage_key, 'selects': list(selects)}, ensure_ascii=False)
+def grid_search_options(storage_key, selects=(), filters_row=False):
+    """GRID_SEARCH_PANEL_JS 상태바 패널 + 외부 필터 gridOptions 생성
+    (storage_key: 그리드별 sessionStorage key, filters_row: 조건 입력을 총건수·통계 다음 줄에 표시)"""
+    config = json.dumps({'key': storage_key, 'selects': list(selects), 'filtersRow': filters_row}, ensure_ascii=False)
     return {
         'statusPanel': JsCode(GRID_SEARCH_PANEL_JS.replace('__CONFIG__', config)),
         'isExternalFilterPresent': JsCode(GRID_SEARCH_PRESENT_JS.replace('__CONFIG__', config)),
@@ -522,6 +544,10 @@ else:
     df_notes['_chart_click'] = 0.0
     df_notes['_load_click'] = 0.0
     df_notes['_refresh_nonce'] = 0.0
+    # 매매대응 결과는 그리드 왼쪽(종목명 바로 뒤)에 배치
+    note_cols = [c for c in df_notes.columns if c != '매매대응 결과']
+    note_cols.insert(note_cols.index('종목명') + 1, '매매대응 결과')
+    df_notes = df_notes[note_cols]
 
     gb = GridOptionsBuilder.from_dataframe(df_notes)
     gb.configure_column('종목코드', hide=True)   # 차트 조회/노트 불러오기용
@@ -538,8 +564,8 @@ else:
                      for t, f in [('매수', '매수근거'), ('매도', '매도근거'), ('개선', '개선할 점'), ('성취', '잘한점')]]},
         {'id': 'result', 'label': '매매대응 결과', 'field': '매매대응 결과',
          'options': [{'value': v, 'text': v} for v in PRINCIPLES.values()]},
-    ])
-    gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': notes_search['statusPanel'], 'align': 'right'}]},
+    ], filters_row=True)   # 작성항목·매매대응 결과·종목명 검색은 총건수·통계 다음 줄에 표시
+    gb.configure_grid_options(statusBar={'statusPanels': [{'statusPanel': notes_search['statusPanel'], 'align': 'left'}]},
                               isExternalFilterPresent=notes_search['isExternalFilterPresent'],
                               doesExternalFilterPass=notes_search['doesExternalFilterPass'])
 
