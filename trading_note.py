@@ -99,8 +99,59 @@ class GridSearchPanel {
         const optionHit = (sel, o, d) => o.field ? String(d[o.field] || '').trim() !== ''
                                                  : String(d[sel.field] || '') === o.value;
 
-        // 콤보 조건 (첫 항목 = 전체)
+        // 조건: sel.multi 면 체크박스 여러 건 선택(선택한 항목 중 하나라도 맞으면 표시, 모두 해제 = 전체),
+        //       아니면 콤보박스 단건 선택 (첫 항목 = 전체)
         cfg.selects.forEach(sel => {
+            if (sel.multi) {
+                const cur = state.sel[sel.id];
+                state.sel[sel.id] = Array.isArray(cur) ? cur : (cur ? [cur] : []);   // 예전 단건 저장값 변환
+                // 콤보박스 모양 버튼 + 클릭 시 열리는 체크박스 목록 (상태바가 그리드 하단이므로 위쪽으로 열림)
+                const box = document.createElement('button');
+                box.type = 'button';
+                box.title = sel.label;
+                box.style.cssText = inputCss + 'background:#fff;cursor:pointer;min-width:130px;text-align:left;';
+                const popup = document.createElement('div');
+                popup.style.cssText = 'position:fixed;display:none;z-index:1000;background:#fff;border:1px solid #d0d0d0;'
+                    + 'border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.15);padding:6px 10px;font-size:.85rem;';
+                const setLabel = () => {
+                    const picked = sel.options.filter(o => state.sel[sel.id].includes(o.value)).map(o => o.text);
+                    box.textContent = sel.label + ' ' + (picked.length ? picked.join(', ') : '전체') + ' ▾';
+                };
+                sel.options.forEach(o => {
+                    const lbl = document.createElement('label');
+                    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;white-space:nowrap;';
+                    const chk = document.createElement('input');
+                    chk.type = 'checkbox';
+                    chk.value = o.value;
+                    chk.checked = state.sel[sel.id].includes(o.value);
+                    chk.style.cssText = 'margin:0;cursor:pointer;';
+                    chk.addEventListener('change', () => {
+                        state.sel[sel.id] = Array.from(popup.querySelectorAll('input:checked')).map(c => c.value);
+                        save();
+                        setLabel();
+                        api.onFilterChanged();
+                    });
+                    lbl.appendChild(chk);
+                    lbl.appendChild(document.createTextNode(o.text));
+                    popup.appendChild(lbl);
+                });
+                box.addEventListener('click', () => {
+                    if (popup.style.display === 'block') { popup.style.display = 'none'; return; }
+                    const r = box.getBoundingClientRect();
+                    popup.style.left = r.left + 'px';
+                    popup.style.bottom = (window.innerHeight - r.top + 2) + 'px';
+                    popup.style.minWidth = r.width + 'px';
+                    popup.style.display = 'block';
+                });
+                // 목록 바깥을 누르면 닫힘
+                this.closePopup = e => { if (!popup.contains(e.target) && e.target !== box) { popup.style.display = 'none'; } };
+                document.addEventListener('mousedown', this.closePopup);
+                this.popups = (this.popups || []).concat(popup);
+                document.body.appendChild(popup);
+                setLabel();
+                filters.appendChild(box);
+                return;
+            }
             const box = document.createElement('select');
             box.style.cssText = inputCss + 'background:#fff;';
             box.title = sel.label;
@@ -175,7 +226,11 @@ class GridSearchPanel {
         filters.appendChild(refresh);   // 종목명 검색 바로 옆 (한 줄 표시면 같은 줄 끝)
     }
     getGui() { return this.eGui; }
-    destroy() { this.api.removeEventListener('modelUpdated', this.update); }
+    destroy() {
+        this.api.removeEventListener('modelUpdated', this.update);
+        if (this.closePopup) { document.removeEventListener('mousedown', this.closePopup); }
+        (this.popups || []).forEach(p => p.remove());
+    }
 }
 """
 GRID_SEARCH_PRESENT_JS = """
@@ -185,10 +240,11 @@ function() {
         try { window.__gridSearch = JSON.parse(sessionStorage.getItem(cfg.key) || '{}'); } catch (e) { window.__gridSearch = {}; }
     }
     const s = window.__gridSearch;
-    return !!((s.name || '').trim() || Object.values(s.sel || {}).some(v => v));
+    return !!((s.name || '').trim() || Object.values(s.sel || {}).some(v => Array.isArray(v) ? v.length > 0 : v));
 }
 """
-# 콤보 조건: 옵션에 field 가 있으면 그 컬럼에 입력 내용이 있는지, 없으면 sel.field 컬럼 값이 옵션 값과 같은지 비교
+# 조건: 옵션에 field 가 있으면 그 컬럼에 입력 내용이 있는지, 없으면 sel.field 컬럼 값이 옵션 값과 같은지 비교
+# (체크박스 여러 건 선택은 선택한 옵션 중 하나라도 맞으면 통과)
 GRID_SEARCH_PASS_JS = """
 function(node) {
     const cfg = __CONFIG__;
@@ -197,13 +253,13 @@ function(node) {
     const name = (s.name || '').trim().toLowerCase();
     if (name && !String(d['종목명'] || '').toLowerCase().includes(name)) { return false; }
     for (const sel of cfg.selects) {
-        const v = (s.sel || {})[sel.id];
-        if (!v) { continue; }
-        const opt = sel.options.find(o => o.value === v);
-        if (!opt) { continue; }
-        if (opt.field) {
-            if (!String(d[opt.field] || '').trim()) { return false; }
-        } else if (String(d[sel.field] || '') !== v) { return false; }
+        const raw = (s.sel || {})[sel.id];
+        const values = (Array.isArray(raw) ? raw : [raw]).filter(v => v);
+        const opts = sel.options.filter(o => values.includes(o.value));
+        if (opts.length === 0) { continue; }
+        const hit = opts.some(o => o.field ? String(d[o.field] || '').trim() !== ''
+                                           : String(d[sel.field] || '') === o.value);
+        if (!hit) { return false; }
     }
     return true;
 }
@@ -513,11 +569,14 @@ st.header("매매노트 조회")
 
 acct_no = account(my_choice)
 
-# 작성기간: 하나의 캘린더에서 시작일/종료일 선택 (시작일만 선택한 상태면 그 하루로 조회)
+# 작성기간: 시작일자/종료일자를 각각의 캘린더에서 선택
 # 작성항목/매매대응 결과/종목명 조건은 그리드 하단 상태바에서 그리드 안에서 처리
-c1, _ = st.columns([1.6, 3.4])
-note_period = c1.date_input("작성기간", (datetime.now() - timedelta(days=30), datetime.now()), format="YYYY-MM-DD")
-strt_date, end_date = (note_period[0], note_period[-1]) if note_period else (datetime.now(), datetime.now())
+c1, c2, _ = st.columns([1, 1, 3])
+strt_date = c1.date_input("작성 시작일자", datetime.now(), format="YYYY-MM-DD")
+end_date = c2.date_input("작성 종료일자", datetime.now(), format="YYYY-MM-DD")
+if strt_date > end_date:   # 시작일자가 종료일자보다 늦으면 두 날짜를 바꿔서 조회
+    st.caption("시작일자가 종료일자보다 늦어 두 날짜를 바꿔서 조회합니다.")
+    strt_date, end_date = end_date, strt_date
 
 cur05 = conn.cursor()
 cur05.execute("""
@@ -556,10 +615,11 @@ else:
     gb.configure_column('_load_click', hide=True)
     gb.configure_column('_refresh_nonce', hide=True)
 
-    # 상태바: 총건수 + 작성항목/매매대응 결과 콤보 + 종목명 검색 + [새로고침]
+    # 상태바: 총건수 + 작성항목 체크박스/매매대응 결과 콤보 + 종목명 검색 + [새로고침]
     # 작성항목: 매수근거→매수, 매도근거→매도, 개선할 점→개선, 잘한점→성취 에 입력 내용이 있는 노트
+    #          (여러 개 체크 시 하나라도 입력 내용이 있으면 표시)
     notes_search = grid_search_options('notesGridSearch', [
-        {'id': 'item', 'label': '작성항목',
+        {'id': 'item', 'label': '작성항목', 'multi': True,
          'options': [{'value': t, 'text': t, 'field': f}
                      for t, f in [('매수', '매수근거'), ('매도', '매도근거'), ('개선', '개선할 점'), ('성취', '잘한점')]]},
         {'id': 'result', 'label': '매매대응 결과', 'field': '매매대응 결과',
